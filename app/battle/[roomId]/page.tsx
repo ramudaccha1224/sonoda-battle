@@ -10,6 +10,12 @@ import { CommandPanel } from "@/components/ui/CommandPanel";
 import { BattleLog } from "@/components/ui/BattleLog";
 import { PartyBar } from "@/components/ui/PartyBar";
 import type { Command, MonsterId, PlayerSlot } from "@/lib/battle/types";
+import {
+  classifyMoveAnim,
+  type ActionAnimType,
+  type BattlePhase,
+} from "@/lib/battle/animations";
+import { getMove } from "@/lib/monsters/moves";
 
 // 3Dシーンはクライアント専用 (SSR を切る)
 const BattleScene = dynamic(
@@ -18,10 +24,10 @@ const BattleScene = dynamic(
 );
 
 // アニメーションのタイミング (ms)
-const APPROACH_MS = 700;   // 攻撃側が前進する
-const RETURN_MS = 600;     // 攻撃後に元の位置に戻る
-const SHAKE_MS = 800;      // 被弾側の揺れ・＞＜表情
-const NON_DAMAGE_MS = 700; // 変化技・スイッチなどダメージなし時の演出時間
+const APPROACH_MS = 1500; // 攻撃の構え / 接近 / 詠唱
+const IMPACT_MS = 2000;   // ヒット / 効果発動（スローモーションで）
+const REACTION_MS = 1500; // 被弾リアクション + 帰宅
+const NON_MOVE_MS = 900;  // スイッチ等、技でないアクションの短い演出
 
 export default function BattleRoomPage() {
   const params = useParams<{ roomId: string }>();
@@ -34,6 +40,9 @@ export default function BattleRoomPage() {
   // 演出用のローカル状態
   const [damagedSlot, setDamagedSlot] = useState<PlayerSlot | null>(null);
   const [attackerSlot, setAttackerSlot] = useState<PlayerSlot | null>(null);
+  const [defenderSlot, setDefenderSlot] = useState<PlayerSlot | null>(null);
+  const [animationType, setAnimationType] = useState<ActionAnimType | null>(null);
+  const [phase, setPhase] = useState<BattlePhase>("idle");
   const [animating, setAnimating] = useState(false);
 
   // shareUrl はクライアントでしか作れないため、マウント後にセットしてハイドレーションを揃える
@@ -61,43 +70,77 @@ export default function BattleRoomPage() {
     });
 
     s.on("battle:turn_resolved", ({ snapshot, events }) => {
-      // 攻撃イベントを探す（最初の damage > 0 / missed=false な move）
+      // どの技が使われたか取得
+      const moveEvent = events.find((e) => e.kind === "move");
+      const moveId = moveEvent && moveEvent.kind === "move" ? moveEvent.moveId : null;
+      const move = moveId ? getMove(moveId) : null;
+
+      // ダメージが入る技か
       const damageHit = events.find(
         (e) => e.kind === "move" && !e.missed && e.damage > 0,
       );
 
-      if (damageHit && damageHit.kind === "move") {
-        // === 攻撃アニメーション ===
-        const attacker = damageHit.actor;
-        const victim: PlayerSlot = attacker === "p1" ? "p2" : "p1";
+      if (move && moveEvent && moveEvent.kind === "move") {
+        const animType = classifyMoveAnim(move);
+        const actor = moveEvent.actor;
+        const target: PlayerSlot = actor === "p1" ? "p2" : "p1";
 
         setAnimating(true);
-        setAttackerSlot(attacker);
+        setAttackerSlot(actor);
+        setDefenderSlot(target);
+        setAnimationType(animType);
 
-        // T = APPROACH_MS: ヒット時にスナップショットを適用 → HP バーが減り始める
-        const tHit = APPROACH_MS;
-        setTimeout(() => {
-          setDamagedSlot(victim);
+        // === Phase 1: APPROACH (1500ms) ===
+        setPhase("approach");
+
+        // === Phase 2: IMPACT (2000ms) ===
+        const tImpact = APPROACH_MS;
+        const damageApplyAt =
+          animType === "physical_attack"
+            ? APPROACH_MS + 300       // 物理: 飛び込み直後（着弾）にHP変化
+            : APPROACH_MS + IMPACT_MS * 0.6; // 魔法/変化: エフェクト到達のタイミング
+
+        const t1 = setTimeout(() => {
+          setPhase("impact");
+        }, tImpact);
+
+        const t2 = setTimeout(() => {
+          // ダメージ系: 揺れ+＞＜ をトリガし、HPバーが減り始める
+          if (damageHit) {
+            setDamagedSlot(target);
+          }
           store.applyTurn(snapshot, events);
-        }, tHit);
+        }, damageApplyAt);
 
-        // T = APPROACH_MS + RETURN_MS: 攻撃側がホームに戻る
-        const tReturn = APPROACH_MS + RETURN_MS;
-        setTimeout(() => {
+        // === Phase 3: REACTION (1500ms) ===
+        const tReaction = APPROACH_MS + IMPACT_MS;
+        const t3 = setTimeout(() => {
+          setPhase("reaction");
+        }, tReaction);
+
+        // === Phase 4: END ===
+        const tEnd = APPROACH_MS + IMPACT_MS + REACTION_MS;
+        const t4 = setTimeout(() => {
+          setPhase("idle");
           setAttackerSlot(null);
-        }, tReturn);
-
-        // T = APPROACH_MS + SHAKE_MS: 揺れ＆＞＜終了、入力解除
-        const tEnd = APPROACH_MS + SHAKE_MS;
-        setTimeout(() => {
+          setDefenderSlot(null);
+          setAnimationType(null);
           setDamagedSlot(null);
           setAnimating(false);
         }, tEnd);
+
+        return () => {
+          clearTimeout(t1);
+          clearTimeout(t2);
+          clearTimeout(t3);
+          clearTimeout(t4);
+        };
       } else {
-        // === ダメージ無し（変化技・スイッチ・外れ）: 短い演出 ===
+        // 技イベントなし（switch のみ等）: 短い演出
         setAnimating(true);
         store.applyTurn(snapshot, events);
-        setTimeout(() => setAnimating(false), NON_DAMAGE_MS);
+        const t = setTimeout(() => setAnimating(false), NON_MOVE_MS);
+        return () => clearTimeout(t);
       }
     });
 
@@ -167,6 +210,9 @@ export default function BattleRoomPage() {
             <BattleView
               damagedSlot={damagedSlot}
               attackerSlot={attackerSlot}
+              defenderSlot={defenderSlot}
+              animationType={animationType}
+              phase={phase}
               animating={animating}
               onSubmit={submitCommand}
             />
@@ -206,34 +252,41 @@ function LobbyView({ shareUrl }: { shareUrl: string }) {
 function BattleView({
   damagedSlot,
   attackerSlot,
+  defenderSlot,
+  animationType,
+  phase,
   animating,
   onSubmit,
 }: {
   damagedSlot: PlayerSlot | null;
   attackerSlot: PlayerSlot | null;
+  defenderSlot: PlayerSlot | null;
+  animationType: ActionAnimType | null;
+  phase: BattlePhase;
   animating: boolean;
   onSubmit: (cmd: Command) => void;
 }) {
-  const { snapshot, yourSlot, phase } = useBattleStore();
+  const { snapshot, yourSlot, phase: storePhase } = useBattleStore();
   if (!snapshot || !yourSlot) return null;
   const opponent: PlayerSlot = yourSlot === "p1" ? "p2" : "p1";
   const isYourTurn = snapshot.currentTurnSlot === yourSlot;
 
   return (
     <div className="grid h-full grid-rows-[auto_1fr_auto] gap-2 p-3">
-      {/* 上: 相手パーティ情報 */}
       <PartyBar player={snapshot.players[opponent]} side="right" />
 
-      {/* 中央: 3Dシーン + ターンインジケータ */}
       <div className="relative overflow-hidden rounded-lg">
         <BattleScene
           snapshot={snapshot}
           yourSlot={yourSlot}
           damagedSlot={damagedSlot}
           attackerSlot={attackerSlot}
+          defenderSlot={defenderSlot}
+          animationType={animationType}
+          phase={phase}
         />
 
-        {phase === "battle" && !snapshot.winner && !animating && (
+        {storePhase === "battle" && !snapshot.winner && !animating && (
           <div
             className={`absolute left-1/2 top-3 -translate-x-1/2 rounded-full px-4 py-1 text-sm font-bold shadow-lg ${
               isYourTurn
@@ -252,11 +305,10 @@ function BattleView({
         )}
       </div>
 
-      {/* 下: 自分パーティ + コマンドパネル */}
       <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_2fr]">
         <PartyBar player={snapshot.players[yourSlot]} side="left" />
 
-        {phase === "battle" && isYourTurn && (
+        {storePhase === "battle" && isYourTurn && (
           <CommandPanel
             snapshot={snapshot}
             yourSlot={yourSlot}
@@ -264,7 +316,7 @@ function BattleView({
             onSubmit={onSubmit}
           />
         )}
-        {phase === "battle" && !isYourTurn && (
+        {storePhase === "battle" && !isYourTurn && (
           <div className="grid place-items-center rounded-lg bg-black/70 p-4 text-center text-sm text-gray-300 backdrop-blur">
             相手のターンです…
           </div>
