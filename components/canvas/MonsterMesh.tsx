@@ -92,7 +92,7 @@ export function MonsterMesh({ def, position, facing, fainted, damaged, label }: 
       {/* ===== 体（やや潰れた球） ===== */}
       <mesh castShadow position={[0, 0.55, 0]} scale={[1.0, 0.85, 1.0]}>
         <sphereGeometry args={[0.85, 32, 24]} />
-        <meshStandardMaterial color={body} roughness={1} metalness={0} metalness={0} />
+        <meshStandardMaterial color={body} roughness={1} metalness={0} />
       </mesh>
 
       {/* お腹（少し前に出してツートーンに見せる） */}
