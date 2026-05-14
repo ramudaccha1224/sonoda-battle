@@ -162,6 +162,11 @@ export function BattleScene({
 
   return (
     <Canvas shadows className="!h-full !w-full">
+      {/* 空色のクリアカラー */}
+      <color attach="background" args={["#b3e0ff"]} />
+      {/* 遠くを少しだけ霞ませて屋外感を出す */}
+      <fog attach="fog" args={["#b3e0ff", 25, 60]} />
+
       <PerspectiveCamera makeDefault fov={45} position={WIDE_CAM_POS} />
       <OrbitControls
         enabled={phase === "idle"}
@@ -178,15 +183,17 @@ export function BattleScene({
         phase={phase}
       />
 
-      <ambientLight intensity={0.6} />
+      {/* 明るい屋外の光: 暖色の太陽光 + 弱めの空からの青い反射光 */}
+      <ambientLight intensity={0.85} color="#fff5d8" />
       <directionalLight
-        position={[6, 10, 6]}
-        intensity={1.1}
+        position={[8, 14, 6]}
+        intensity={1.5}
+        color="#fff5d8"
         castShadow
         shadow-mapSize-width={1024}
         shadow-mapSize-height={1024}
       />
-      <directionalLight position={[-6, 6, -3]} intensity={0.3} color="#9bb6ff" />
+      <directionalLight position={[-6, 6, -3]} intensity={0.35} color="#bcd5ff" />
 
       <Stadium />
 
