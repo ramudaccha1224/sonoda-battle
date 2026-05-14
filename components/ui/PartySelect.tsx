@@ -35,7 +35,7 @@ export function PartySelect({ onConfirm, disabled }: Props) {
           パーティを 2 体選んでください（ {picks.length} / 2 ）
         </div>
         <div className="text-[10px] text-gray-500">
-          「詳細」でキャラクターの情報を確認できます
+          「わざをみる」でキャラの覚えているわざを確認できます
         </div>
       </div>
 
@@ -78,7 +78,7 @@ export function PartySelect({ onConfirm, disabled }: Props) {
                 }}
                 className="rounded border border-white/20 px-3 py-1 text-xs text-gray-200 transition hover:bg-white/10"
               >
-                詳細
+                わざをみる
               </button>
             </div>
           );

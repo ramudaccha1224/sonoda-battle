@@ -2,19 +2,28 @@
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, PerspectiveCamera } from "@react-three/drei";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import * as THREE from "three";
-import { useSpring, animated, easings } from "@react-spring/three";
 import { Stadium } from "./Stadium";
-import { MonsterMesh } from "./MonsterMesh";
+import { MonsterMesh, type LimbRefs } from "./MonsterMesh";
 import { MagicProjectile } from "./MagicProjectile";
 import { AuraEffect } from "./AuraEffect";
+import { AnimatedCat } from "./AnimatedCat";
+import {
+  BeamEffect,
+  CloudEffect,
+  RingPulseEffect,
+  ZBubbleEffect,
+  SnackIconEffect,
+  SparklesBurstEffect,
+} from "./EmitEffects";
+import { PuffEffect, DizzyStarsEffect } from "./ImpactExtras";
 import { getMonsterDef } from "@/lib/monsters/definitions";
 import type { BattleSnapshot, PlayerSlot } from "@/lib/battle/types";
 import {
-  effectColorFor,
   type ActionAnimType,
   type BattlePhase,
+  type MoveAnimProfile,
 } from "@/lib/battle/animations";
 
 interface Props {
@@ -25,6 +34,13 @@ interface Props {
   defenderSlot?: PlayerSlot | null;
   animationType?: ActionAnimType | null;
   phase?: BattlePhase;
+  /** 技ごとの固有アニメプロファイル */
+  moveAnimProfile?: MoveAnimProfile | null;
+  faintingInfo?: {
+    slot: PlayerSlot;
+    partyIndex: number;
+    stage: "reaction" | "fading";
+  } | null;
 }
 
 // ホームポジション
@@ -33,7 +49,7 @@ const HOME_POSITIONS: Record<"yours" | "opp", [number, number, number]> = {
   opp: [2, 0.4, -3],
 };
 
-// 物理攻撃のストライク位置: 相手の少し手前で停止する
+// 物理攻撃のストライク位置
 function attackPositionFor(
   attacker: "yours" | "opp",
 ): [number, number, number] {
@@ -51,18 +67,38 @@ function attackPositionFor(
 const WIDE_CAM_POS: [number, number, number] = [0, 4.5, 10];
 const WIDE_CAM_LOOK: [number, number, number] = [0, 1, 0];
 
-/** アクション中の close-up カメラ位置と注視点 */
 function closeUpFor(
   attacker: "yours" | "opp",
   animType: ActionAnimType,
+  phase: BattlePhase,
 ): { pos: [number, number, number]; look: [number, number, number] } {
   const aHome = HOME_POSITIONS[attacker];
   const dHome = HOME_POSITIONS[attacker === "yours" ? "opp" : "yours"];
+  const isDamagingType =
+    animType === "physical_attack" ||
+    animType === "magic_attack" ||
+    animType === "opponent_curse";
 
-  // 注視点
+  if (
+    isDamagingType &&
+    (phase === "impact" || phase === "reaction" || phase === "faint")
+  ) {
+    const fx = aHome[0] - dHome[0];
+    const fz = aHome[2] - dHome[2];
+    const flen = Math.sqrt(fx * fx + fz * fz);
+    const camDist = 4.2;
+    return {
+      pos: [
+        dHome[0] + (fx / flen) * camDist,
+        2.2,
+        dHome[2] + (fz / flen) * camDist,
+      ],
+      look: [dHome[0], 1.4, dHome[2]],
+    };
+  }
+
   let look: [number, number, number];
-  if (animType === "physical_attack" || animType === "magic_attack" || animType === "opponent_curse") {
-    // ストライク地点 / 相手寄り
+  if (isDamagingType) {
     const f = animType === "physical_attack" ? 0.7 : 0.55;
     look = [
       aHome[0] + (dHome[0] - aHome[0]) * f,
@@ -70,14 +106,11 @@ function closeUpFor(
       aHome[2] + (dHome[2] - aHome[2]) * f,
     ];
   } else if (animType === "self_support") {
-    // 攻撃者にカメラを寄せる
     look = [aHome[0], 1.2, aHome[2]];
   } else {
-    // shared_aura: 真ん中
     look = [0, 1.2, 0];
   }
 
-  // 方向: 攻撃方向に対して 90° 横（観客側 +Z）
   const dx = dHome[0] - aHome[0];
   const dz = dHome[2] - aHome[2];
   const len = Math.sqrt(dx * dx + dz * dz);
@@ -94,10 +127,15 @@ function closeUpFor(
   };
 }
 
-/** モンスターの頭の上のおおよそのワールド座標を返す */
+/** モンスターの頭の上のおおよそのワールド座標 */
 function headPosFor(tag: "yours" | "opp"): [number, number, number] {
   const h = HOME_POSITIONS[tag];
   return [h[0], h[1] + 2.0, h[2]];
+}
+/** モンスターの中央 (胴体) */
+function bodyPosFor(tag: "yours" | "opp"): [number, number, number] {
+  const h = HOME_POSITIONS[tag];
+  return [h[0], h[1] + 1.0, h[2]];
 }
 
 export function BattleScene({
@@ -108,63 +146,98 @@ export function BattleScene({
   defenderSlot,
   animationType,
   phase = "idle",
+  moveAnimProfile,
+  faintingInfo,
 }: Props) {
   const opponentSlot: PlayerSlot = yourSlot === "p1" ? "p2" : "p1";
 
-  const yourActive = snapshot.players[yourSlot].party[snapshot.players[yourSlot].activeIndex];
-  const oppActive = snapshot.players[opponentSlot].party[snapshot.players[opponentSlot].activeIndex];
+  // ひんし演出: 倒れていく方を表示する
+  const yourDisplayIndex =
+    faintingInfo?.slot === yourSlot
+      ? faintingInfo.partyIndex
+      : snapshot.players[yourSlot].activeIndex;
+  const oppDisplayIndex =
+    faintingInfo?.slot === opponentSlot
+      ? faintingInfo.partyIndex
+      : snapshot.players[opponentSlot].activeIndex;
+
+  const yourActive = snapshot.players[yourSlot].party[yourDisplayIndex];
+  const oppActive = snapshot.players[opponentSlot].party[oppDisplayIndex];
 
   const yourDef = getMonsterDef(yourActive.defId);
   const oppDef = getMonsterDef(oppActive.defId);
 
-  // damaged フラッシュ
-  const [flashYou, setFlashYou] = useState(false);
-  const [flashOpp, setFlashOpp] = useState(false);
-  useEffect(() => {
-    if (damagedSlot === yourSlot) {
-      setFlashYou(true);
-      const t = setTimeout(() => setFlashYou(false), 1100);
-      return () => clearTimeout(t);
-    }
-    if (damagedSlot === opponentSlot) {
-      setFlashOpp(true);
-      const t = setTimeout(() => setFlashOpp(false), 1100);
-      return () => clearTimeout(t);
-    }
-  }, [damagedSlot, yourSlot, opponentSlot]);
+  const yourFaintOverride = faintingInfo?.slot === yourSlot ? faintingInfo : null;
+  const oppFaintOverride = faintingInfo?.slot === opponentSlot ? faintingInfo : null;
+  const yourEffectiveFainted = yourFaintOverride
+    ? yourFaintOverride.stage === "fading"
+    : yourActive.fainted;
+  const oppEffectiveFainted = oppFaintOverride
+    ? oppFaintOverride.stage === "fading"
+    : oppActive.fainted;
+  const yourFadeOut = yourFaintOverride?.stage === "fading";
+  const oppFadeOut = oppFaintOverride?.stage === "fading";
+
+  // damaged フラッシュは damagedSlot を直接反映
+  const flashYou = damagedSlot === yourSlot;
+  const flashOpp = damagedSlot === opponentSlot;
 
   const attackerTag: "yours" | "opp" | null =
     attackerSlot == null ? null : attackerSlot === yourSlot ? "yours" : "opp";
   const defenderTag: "yours" | "opp" | null =
     defenderSlot == null ? null : defenderSlot === yourSlot ? "yours" : "opp";
 
-  // 魔法弾 / 相手呪い のエフェクト用
-  const isProjectilePhase =
-    phase === "impact" &&
-    (animationType === "magic_attack" || animationType === "opponent_curse") &&
-    attackerTag !== null &&
-    defenderTag !== null;
+  // 手足 ref を AnimatedCat と MonsterMesh で共有
+  const yourLimbsRef = useRef<LimbRefs | null>(null);
+  const oppLimbsRef = useRef<LimbRefs | null>(null);
 
-  const projectileColor = effectColorFor(animationType ?? "physical_attack");
-  const projectileFrom = attackerTag ? headPosFor(attackerTag) : [0, 0, 0];
-  const projectileTo = defenderTag
-    ? [HOME_POSITIONS[defenderTag][0], 1.5, HOME_POSITIONS[defenderTag][2]]
-    : [0, 0, 0];
+  // ===== 各エフェクトの active 判定 =====
+  // emit は impact フェーズ中、moveAnimProfile.emit に応じて発動
+  const emit = moveAnimProfile?.emit;
+  const isImpact = phase === "impact" && attackerTag !== null;
 
-  // オーラ (自分強化 / 双方系)
-  const isSelfAuraPhase =
-    phase === "impact" &&
+  const emitFrom = attackerTag ? headPosFor(attackerTag) : ([0, 0, 0] as [number, number, number]);
+  const emitTo = defenderTag ? bodyPosFor(defenderTag) : ([0, 0, 0] as [number, number, number]);
+
+  const isProjectile = isImpact && emit?.kind === "projectile_sphere";
+  const isBeam = isImpact && emit?.kind === "beam";
+  const isCloud = isImpact && emit?.kind === "cloud";
+  const isRingPulse = isImpact && emit?.kind === "ring_pulse";
+  const isSparklesEmit = isImpact && emit?.kind === "sparkles";
+  const isZBubble = isImpact && emit?.kind === "z_bubble";
+  const isSnackIcon = isImpact && emit?.kind === "snack_icon";
+
+  // impact extra は damagedSlot 反映と同タイミング
+  const impactExtra = moveAnimProfile?.impactExtra;
+  const isPuff = !!damagedSlot && impactExtra === "puff";
+  const isDizzy = !!damagedSlot && impactExtra === "dizzy_stars";
+
+  // ZBubble のターゲット位置
+  // - お昼寝 (issho_ohirune): 双方の上
+  // - あくびの連鎖 (akubi_rensa): 相手の上
+  // 判定は moveAnimProfile から見て、emit=z_bubble & impactExtra なしなら「双方」
+  // emit=z_bubble & 攻撃者motion=big_yawn なら「相手の上」
+  const zPositions: [number, number, number][] = (() => {
+    if (!isZBubble) return [];
+    if (moveAnimProfile?.attackerMotion === "big_yawn" && defenderTag) {
+      return [headPosFor(defenderTag)];
+    }
+    // それ以外 (お昼寝など): 双方の上
+    const positions: [number, number, number][] = [];
+    if (attackerTag) positions.push(headPosFor(attackerTag));
+    if (defenderTag) positions.push(headPosFor(defenderTag));
+    return positions;
+  })();
+
+  // 自分強化系のオーラ (旧仕様継承)
+  const isAuraSelf = isImpact &&
     (animationType === "self_support" || animationType === "shared_aura") &&
-    attackerTag !== null;
-  const isSharedAuraPhase = phase === "impact" && animationType === "shared_aura";
-
-  const auraColor = effectColorFor(animationType ?? "self_support");
+    attackerTag !== null && !emit;
+  const isAuraBoth = isImpact && animationType === "shared_aura";
 
   return (
     <Canvas shadows className="!h-full !w-full">
-      {/* 空色のクリアカラー */}
       <color attach="background" args={["#b3e0ff"]} />
-      {/* 遠くを少しだけ霞ませて屋外感を出す */}
       <fog attach="fog" args={["#b3e0ff", 25, 60]} />
 
       <PerspectiveCamera makeDefault fov={45} position={WIDE_CAM_POS} />
@@ -183,7 +256,6 @@ export function BattleScene({
         phase={phase}
       />
 
-      {/* 明るい屋外の光: 暖色の太陽光 + 弱めの空からの青い反射光 */}
       <ambientLight intensity={0.85} color="#fff5d8" />
       <directionalLight
         position={[8, 14, 6]}
@@ -197,74 +269,123 @@ export function BattleScene({
 
       <Stadium />
 
-      {/* 自分側モンスター */}
+      {/* ===== 自分側 ===== */}
       <AnimatedCat
         homePos={HOME_POSITIONS.yours}
         attackPos={attackPositionFor("yours")}
         isAttacker={attackerTag === "yours"}
         animationType={animationType}
+        attackerMotion={attackerTag === "yours" ? moveAnimProfile?.attackerMotion : undefined}
         phase={phase}
+        limbsRef={yourLimbsRef}
       >
         <MonsterMesh
           def={yourDef}
           position={[0, 0, 0]}
           facing="back"
-          fainted={yourActive.fainted}
+          fainted={yourEffectiveFainted}
+          fadeOut={yourFadeOut}
           damaged={flashYou}
+          impactExtra={defenderTag === "yours" ? impactExtra : undefined}
+          onLimbRefs={(refs) => {
+            yourLimbsRef.current = refs;
+          }}
           label={`${yourActive.currentHp}/${yourDef.stats.hp} ${yourDef.name}`}
         />
       </AnimatedCat>
 
-      {/* 相手側モンスター */}
+      {/* ===== 相手側 ===== */}
       <AnimatedCat
         homePos={HOME_POSITIONS.opp}
         attackPos={attackPositionFor("opp")}
         isAttacker={attackerTag === "opp"}
         animationType={animationType}
+        attackerMotion={attackerTag === "opp" ? moveAnimProfile?.attackerMotion : undefined}
         phase={phase}
+        limbsRef={oppLimbsRef}
       >
         <MonsterMesh
           def={oppDef}
           position={[0, 0, 0]}
           facing="front"
-          fainted={oppActive.fainted}
+          fainted={oppEffectiveFainted}
+          fadeOut={oppFadeOut}
           damaged={flashOpp}
+          impactExtra={defenderTag === "opp" ? impactExtra : undefined}
+          onLimbRefs={(refs) => {
+            oppLimbsRef.current = refs;
+          }}
           label={`${oppDef.name} ${oppActive.currentHp}/${oppDef.stats.hp}`}
         />
       </AnimatedCat>
 
-      {/* 魔法弾 (魔法攻撃 / 相手呪い時のみ) */}
+      {/* ===== Emit エフェクト ===== */}
       <MagicProjectile
-        from={projectileFrom as [number, number, number]}
-        to={projectileTo as [number, number, number]}
+        from={emitFrom}
+        to={emitTo}
         duration={1.2}
-        color={projectileColor}
-        active={isProjectilePhase}
+        color={emit?.kind === "projectile_sphere" ? emit.color : "#ffffff"}
+        active={isProjectile}
+      />
+      <BeamEffect
+        from={emitFrom}
+        to={emitTo}
+        color={emit?.kind === "beam" ? emit.color : "#ffffff"}
+        active={isBeam}
+      />
+      <CloudEffect
+        from={emitFrom}
+        to={emitTo}
+        color={emit?.kind === "cloud" ? emit.color : "#ffffff"}
+        active={isCloud}
+      />
+      <RingPulseEffect
+        center={attackerTag ? bodyPosFor(attackerTag) : [0, 0, 0]}
+        color={emit?.kind === "ring_pulse" ? emit.color : "#ffffff"}
+        active={isRingPulse}
+      />
+      <SparklesBurstEffect
+        center={attackerTag ? bodyPosFor(attackerTag) : [0, 0, 0]}
+        color={emit?.kind === "sparkles" ? emit.color : "#ffffff"}
+        active={isSparklesEmit}
+      />
+      <ZBubbleEffect positions={zPositions} active={isZBubble} />
+      <SnackIconEffect
+        position={attackerTag ? [headPosFor(attackerTag)[0], headPosFor(attackerTag)[1] - 0.4, headPosFor(attackerTag)[2]] : [0, 0, 0]}
+        active={isSnackIcon}
       />
 
-      {/* 自分頭上のオーラ (自分強化系) */}
-      {attackerTag && (
+      {/* 旧仕様: emit が無い自分強化 / 双方系の AuraEffect（バフ・回復で emit を持たない技用にフォールバック） */}
+      {attackerTag && isAuraSelf && (
         <AuraEffect
           position={headPosFor(attackerTag)}
-          color={auraColor}
-          active={isSelfAuraPhase}
-        />
-      )}
-      {/* 双方系の場合は防御側にも */}
-      {defenderTag && isSharedAuraPhase && (
-        <AuraEffect
-          position={headPosFor(defenderTag)}
-          color={auraColor}
+          color="#ffd966"
           active={true}
         />
       )}
+      {defenderTag && isAuraBoth && (
+        <AuraEffect
+          position={headPosFor(defenderTag)}
+          color="#f6c0c8"
+          active={true}
+        />
+      )}
+
+      {/* ===== Impact Extra (被弾側に重ねる) ===== */}
+      <PuffEffect
+        position={defenderTag ? bodyPosFor(defenderTag) : [0, 0, 0]}
+        active={isPuff}
+      />
+      <DizzyStarsEffect
+        center={defenderTag ? headPosFor(defenderTag) : [0, 0, 0]}
+        active={isDizzy}
+      />
     </Canvas>
   );
 }
 
 /**
  * カメラを「引き」と「攻撃中クローズアップ」の間で滑らかに動かす。
- * 物理: ストライク地点 / 魔法: 相手寄り / 自分強化: 攻撃者 / 双方系: 中央。
  */
 function CameraDirector({
   attackerTag,
@@ -281,14 +402,13 @@ function CameraDirector({
   const currentLookRef = useRef(new THREE.Vector3(...WIDE_CAM_LOOK));
 
   useEffect(() => {
-    // reaction の中盤以降は引きに戻し始める
     const goingWide =
       attackerTag == null || animationType == null || phase === "idle";
     if (goingWide) {
       targetPosRef.current.set(...WIDE_CAM_POS);
       targetLookRef.current.set(...WIDE_CAM_LOOK);
     } else {
-      const { pos, look } = closeUpFor(attackerTag, animationType);
+      const { pos, look } = closeUpFor(attackerTag, animationType, phase);
       targetPosRef.current.set(...pos);
       targetLookRef.current.set(...look);
     }
@@ -304,188 +424,4 @@ function CameraDirector({
   });
 
   return null;
-}
-
-/**
- * モンスターの位置 + スケールアニメ。
- * animationType + phase の組み合わせで挙動を分岐する。
- *
- * - physical_attack:
- *     approach=ジャンプ接近, impact=着弾ぐっと潰れ, reaction=帰宅
- * - magic_attack / opponent_curse:
- *     approach=その場でふにゃふにゃ上下, impact=構え, reaction=ホームに戻る
- * - self_support / shared_aura:
- *     approach=ふんわり構え, impact=オーラ発動中じっとして輝く, reaction=戻る
- */
-function AnimatedCat({
-  homePos,
-  attackPos,
-  isAttacker,
-  animationType,
-  phase,
-  children,
-}: {
-  homePos: [number, number, number];
-  attackPos: [number, number, number];
-  isAttacker: boolean;
-  animationType?: ActionAnimType | null;
-  phase: BattlePhase;
-  children: React.ReactNode;
-}) {
-  const ref = useRef<THREE.Group>(null);
-
-  // 物理移動の進行度 0..1
-  const moveProgressRef = useRef(0);
-  const moveTargetRef = useRef(0);
-  // 内部時計（魔法バウンス用、phase 切り替え時にリセット）
-  const phaseStartRef = useRef(performance.now());
-
-  // スケール (react-spring)
-  const [styles, api] = useSpring(() => ({
-    scaleX: 1,
-    scaleY: 1,
-    scaleZ: 1,
-    config: { tension: 220, friction: 14 },
-  }));
-
-  // phase が変わったタイミングを記録 + スケールを切り替え
-  useEffect(() => {
-    phaseStartRef.current = performance.now();
-    if (!isAttacker) {
-      // 自分が攻撃者でないなら通常スケール
-      api.start({ scaleX: 1, scaleY: 1, scaleZ: 1 });
-      return;
-    }
-    const type = animationType;
-    if (phase === "approach") {
-      // しゃがみ込み
-      if (type === "physical_attack") {
-        api.start({ scaleX: 1.15, scaleY: 0.85, scaleZ: 1.15 });
-        const t1 = setTimeout(() => {
-          api.start({ scaleX: 0.92, scaleY: 1.15, scaleZ: 0.92 });
-        }, 200);
-        return () => clearTimeout(t1);
-      } else if (type === "magic_attack" || type === "opponent_curse") {
-        api.start({ scaleX: 1.05, scaleY: 0.95, scaleZ: 1.05 }); // 構え
-      } else {
-        api.start({ scaleX: 1.05, scaleY: 0.95, scaleZ: 1.05 }); // 落ち着いた構え
-      }
-    } else if (phase === "impact") {
-      if (type === "physical_attack") {
-        // 着弾 (ぐっと潰れる)
-        api.start({
-          scaleX: 1.3,
-          scaleY: 0.7,
-          scaleZ: 1.3,
-          config: { tension: 320, friction: 10 },
-        });
-        const t1 = setTimeout(() => {
-          api.start({
-            scaleX: 0.97,
-            scaleY: 1.05,
-            scaleZ: 0.97,
-            config: { tension: 180, friction: 14 },
-          });
-        }, 400);
-        return () => clearTimeout(t1);
-      } else if (type === "magic_attack" || type === "opponent_curse") {
-        // 魔法を放つ瞬間: 大きく伸び上がる
-        api.start({
-          scaleX: 0.9,
-          scaleY: 1.25,
-          scaleZ: 0.9,
-          config: { tension: 240, friction: 12 },
-        });
-        const t1 = setTimeout(() => {
-          api.start({ scaleX: 1, scaleY: 1, scaleZ: 1 });
-        }, 600);
-        return () => clearTimeout(t1);
-      } else {
-        // 自分強化系: わずかに大きくなって光る
-        api.start({
-          scaleX: 1.08,
-          scaleY: 1.08,
-          scaleZ: 1.08,
-          config: { tension: 160, friction: 18 },
-        });
-      }
-    } else if (phase === "reaction" || phase === "idle") {
-      // 戻る
-      api.start({
-        scaleX: 1,
-        scaleY: 1,
-        scaleZ: 1,
-        config: { tension: 160, friction: 18 },
-      });
-    }
-  }, [phase, isAttacker, animationType, api]);
-
-  // 物理攻撃の場合だけ位置を移動させる目標値
-  useEffect(() => {
-    const physical = animationType === "physical_attack" && isAttacker;
-    // 物理: approach/impact 中は攻撃位置、それ以外はホーム
-    if (physical && (phase === "approach" || phase === "impact")) {
-      moveTargetRef.current = 1;
-    } else {
-      moveTargetRef.current = 0;
-    }
-  }, [animationType, phase, isAttacker]);
-
-  useFrame((_, delta) => {
-    if (!ref.current) return;
-
-    // ----- 物理移動 -----
-    const target = moveTargetRef.current;
-    const current = moveProgressRef.current;
-    const diff = target - current;
-    if (Math.abs(diff) > 0.001) {
-      const duration = target > current ? 1.4 : 1.4; // 1.5s と揃える
-      const step = Math.sign(diff) * Math.min(Math.abs(diff), delta / duration);
-      moveProgressRef.current = current + step;
-    }
-    const tMove = moveProgressRef.current;
-    const eased = easings.easeInOutCubic(tMove);
-
-    // 放物線でジャンプ感（物理の時だけ）
-    const isJumping = animationType === "physical_attack" && isAttacker;
-    const jumpHeight = isJumping ? 0.7 * 4 * eased * (1 - eased) : 0;
-
-    let posX = homePos[0] + (attackPos[0] - homePos[0]) * eased;
-    let posY = homePos[1] + (attackPos[1] - homePos[1]) * eased + jumpHeight;
-    let posZ = homePos[2] + (attackPos[2] - homePos[2]) * eased;
-
-    // ----- 魔法 approach: その場でふにゃふにゃ上下バウンス -----
-    if (
-      isAttacker &&
-      (animationType === "magic_attack" || animationType === "opponent_curse") &&
-      phase === "approach"
-    ) {
-      const elapsed = (performance.now() - phaseStartRef.current) / 1000;
-      posY += Math.abs(Math.sin(elapsed * 4)) * 0.5; // 0〜0.5 のジャンプを繰り返す
-    }
-
-    // ----- 自分強化 approach/impact: ふんわり浮く -----
-    if (
-      isAttacker &&
-      (animationType === "self_support" || animationType === "shared_aura") &&
-      (phase === "approach" || phase === "impact")
-    ) {
-      const elapsed = (performance.now() - phaseStartRef.current) / 1000;
-      posY += Math.sin(elapsed * 2) * 0.15;
-    }
-
-    ref.current.position.set(posX, posY, posZ);
-  });
-
-  return (
-    <group ref={ref}>
-      <animated.group
-        scale-x={styles.scaleX}
-        scale-y={styles.scaleY}
-        scale-z={styles.scaleZ}
-      >
-        {children}
-      </animated.group>
-    </group>
-  );
 }

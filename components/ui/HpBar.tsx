@@ -14,7 +14,7 @@ export function HpBar({ current, max, compact }: Props) {
     <div className={compact ? "w-24" : "w-full"}>
       <div className="h-2 w-full rounded bg-gray-700 overflow-hidden">
         <div
-          className={`h-full ${color} transition-[width] duration-[800ms] ease-out`}
+          className={`h-full ${color} transition-[width] duration-[2500ms] ease-out`}
           style={{ width: `${ratio * 100}%` }}
         />
       </div>

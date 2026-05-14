@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getSocket, disconnectSocket } from "@/lib/net/socket";
 import { useBattleStore } from "@/store/battleStore";
@@ -14,8 +14,10 @@ import {
   classifyMoveAnim,
   type ActionAnimType,
   type BattlePhase,
+  type MoveAnimProfile,
 } from "@/lib/battle/animations";
 import { getMove } from "@/lib/monsters/moves";
+import { getMoveAnimProfile } from "@/lib/battle/moveAnimProfiles";
 
 // 3Dシーンはクライアント専用 (SSR を切る)
 const BattleScene = dynamic(
@@ -26,7 +28,8 @@ const BattleScene = dynamic(
 // アニメーションのタイミング (ms)
 const APPROACH_MS = 1500; // 攻撃の構え / 接近 / 詠唱
 const IMPACT_MS = 2000;   // ヒット / 効果発動（スローモーションで）
-const REACTION_MS = 1500; // 被弾リアクション + 帰宅
+const REACTION_MS = 3000; // 被弾側を映してダメージゲージが減る時間
+const FAINT_MS = 1500;    // ひんし時の倒れ＋フェードアウト時間
 const NON_MOVE_MS = 900;  // スイッチ等、技でないアクションの短い演出
 
 export default function BattleRoomPage() {
@@ -43,8 +46,15 @@ export default function BattleRoomPage() {
   const [attackerSlot, setAttackerSlot] = useState<PlayerSlot | null>(null);
   const [defenderSlot, setDefenderSlot] = useState<PlayerSlot | null>(null);
   const [animationType, setAnimationType] = useState<ActionAnimType | null>(null);
+  const [moveAnimProfile, setMoveAnimProfile] = useState<MoveAnimProfile | null>(null);
   const [phase, setPhase] = useState<BattlePhase>("idle");
   const [animating, setAnimating] = useState(false);
+  // ひんし演出のオーバーライド (倒れていく方を見せ続けるため)
+  const [faintingInfo, setFaintingInfo] = useState<{
+    slot: PlayerSlot;
+    partyIndex: number;
+    stage: "reaction" | "fading";
+  } | null>(null);
 
   // 接続 & イベント購読
   useEffect(() => {
@@ -74,61 +84,100 @@ export default function BattleRoomPage() {
       const damageHit = events.find(
         (e) => e.kind === "move" && !e.missed && e.damage > 0,
       );
+      // ひんしが起きたか（被弾側）
+      const faintEvent = events.find((e) => e.kind === "faint");
 
       if (move && moveEvent && moveEvent.kind === "move") {
         const animType = classifyMoveAnim(move);
         const actor = moveEvent.actor;
         const target: PlayerSlot = actor === "p1" ? "p2" : "p1";
 
+        // 倒れる予定のモンスターの party index を取り出す。
+        // 直前 (このターン前) の被弾側 activeIndex がそのまま倒れた個体。
+        const prevSnap = useBattleStore.getState().snapshot;
+        const prevDefenderActiveIdx = prevSnap?.players[target]?.activeIndex ?? null;
+        const willFaint =
+          !!faintEvent &&
+          faintEvent.kind === "faint" &&
+          faintEvent.actor === target &&
+          prevDefenderActiveIdx != null;
+        const faintingPartyIdx = willFaint ? prevDefenderActiveIdx! : null;
+
         setAnimating(true);
         setAttackerSlot(actor);
         setDefenderSlot(target);
         setAnimationType(animType);
+        setMoveAnimProfile(getMoveAnimProfile(moveId!));
 
-        // === Phase 1: APPROACH (1500ms) ===
+        // === Phase 1: APPROACH ===
         setPhase("approach");
 
-        // === Phase 2: IMPACT (2000ms) ===
-        const tImpact = APPROACH_MS;
-        const damageApplyAt =
-          animType === "physical_attack"
-            ? APPROACH_MS + 300       // 物理: 飛び込み直後（着弾）にHP変化
-            : APPROACH_MS + IMPACT_MS * 0.6; // 魔法/変化: エフェクト到達のタイミング
+        // ダメージ反映タイミング
+        const damageApplyAt = damageHit
+          ? animType === "physical_attack"
+            ? APPROACH_MS + 300
+            : APPROACH_MS + IMPACT_MS * 0.6
+          : APPROACH_MS + IMPACT_MS / 2;
 
-        const t1 = setTimeout(() => {
-          setPhase("impact");
-        }, tImpact);
+        const tids: ReturnType<typeof setTimeout>[] = [];
 
-        const t2 = setTimeout(() => {
-          // ダメージ系: 揺れ+＞＜ をトリガし、HPバーが減り始める
-          if (damageHit) {
-            setDamagedSlot(target);
-          }
-          store.applyTurn(snapshot, events);
-        }, damageApplyAt);
+        // → impact phase
+        tids.push(
+          setTimeout(() => setPhase("impact"), APPROACH_MS),
+        );
 
-        // === Phase 3: REACTION (1500ms) ===
-        const tReaction = APPROACH_MS + IMPACT_MS;
-        const t3 = setTimeout(() => {
-          setPhase("reaction");
-        }, tReaction);
+        // ヒット時: ダメージ適用 + reaction phase 開始
+        tids.push(
+          setTimeout(() => {
+            if (damageHit) setDamagedSlot(target);
+            // ひんし予定なら、倒れていく方を引き続き描画するための override をセット。
+            if (faintingPartyIdx != null) {
+              setFaintingInfo({
+                slot: target,
+                partyIndex: faintingPartyIdx,
+                stage: "reaction",
+              });
+            }
+            store.applyTurn(snapshot, events);
+            setPhase("reaction");
+          }, damageApplyAt),
+        );
 
-        // === Phase 4: END ===
-        const tEnd = APPROACH_MS + IMPACT_MS + REACTION_MS;
-        const t4 = setTimeout(() => {
-          setPhase("idle");
-          setAttackerSlot(null);
-          setDefenderSlot(null);
-          setAnimationType(null);
-          setDamagedSlot(null);
-          setAnimating(false);
-        }, tEnd);
+        // reaction 終了
+        const tReactionEnd = damageApplyAt + REACTION_MS;
+        tids.push(
+          setTimeout(() => {
+            // ＞＜ 揺れ表示は終了。
+            setDamagedSlot(null);
+            if (faintingPartyIdx != null) {
+              // → faint phase: 倒れる + フェード
+              setFaintingInfo({
+                slot: target,
+                partyIndex: faintingPartyIdx,
+                stage: "fading",
+              });
+              setPhase("faint");
+            }
+          }, tReactionEnd),
+        );
+
+        // 全終了
+        const tEnd = faintingPartyIdx != null ? tReactionEnd + FAINT_MS : tReactionEnd;
+        tids.push(
+          setTimeout(() => {
+            setPhase("idle");
+            setAttackerSlot(null);
+            setDefenderSlot(null);
+            setAnimationType(null);
+            setMoveAnimProfile(null);
+            setDamagedSlot(null);
+            setFaintingInfo(null);
+            setAnimating(false);
+          }, tEnd),
+        );
 
         return () => {
-          clearTimeout(t1);
-          clearTimeout(t2);
-          clearTimeout(t3);
-          clearTimeout(t4);
+          tids.forEach(clearTimeout);
         };
       } else {
         // 技イベントなし（switch のみ等）: 短い演出
@@ -206,8 +255,10 @@ export default function BattleRoomPage() {
               attackerSlot={attackerSlot}
               defenderSlot={defenderSlot}
               animationType={animationType}
+              moveAnimProfile={moveAnimProfile}
               phase={phase}
               animating={animating}
+              faintingInfo={faintingInfo}
               onSubmit={submitCommand}
             />
           )}
@@ -269,16 +320,22 @@ function BattleView({
   attackerSlot,
   defenderSlot,
   animationType,
+  moveAnimProfile,
   phase,
   animating,
+  faintingInfo,
   onSubmit,
 }: {
   damagedSlot: PlayerSlot | null;
   attackerSlot: PlayerSlot | null;
   defenderSlot: PlayerSlot | null;
   animationType: ActionAnimType | null;
+  moveAnimProfile: MoveAnimProfile | null;
   phase: BattlePhase;
   animating: boolean;
+  faintingInfo:
+    | { slot: PlayerSlot; partyIndex: number; stage: "reaction" | "fading" }
+    | null;
   onSubmit: (cmd: Command) => void;
 }) {
   const { snapshot, yourSlot, phase: storePhase } = useBattleStore();
@@ -286,9 +343,26 @@ function BattleView({
   const opponent: PlayerSlot = yourSlot === "p1" ? "p2" : "p1";
   const isYourTurn = snapshot.currentTurnSlot === yourSlot;
 
+  // 倒れていく方を「現役」として PartyBar にも反映させるための実効スナップショット。
+  // これで HP ゲージや active ハイライトが、3 秒 reaction の間ずっと
+  // 倒れる方を指したまま動かない。
+  const effectiveSnapshot = useMemo(() => {
+    if (!faintingInfo) return snapshot;
+    return {
+      ...snapshot,
+      players: {
+        ...snapshot.players,
+        [faintingInfo.slot]: {
+          ...snapshot.players[faintingInfo.slot],
+          activeIndex: faintingInfo.partyIndex,
+        },
+      },
+    };
+  }, [snapshot, faintingInfo]);
+
   return (
     <div className="grid h-full grid-rows-[auto_1fr_auto] gap-2 p-3">
-      <PartyBar player={snapshot.players[opponent]} side="right" />
+      <PartyBar player={effectiveSnapshot.players[opponent]} side="right" />
 
       <div className="relative overflow-hidden rounded-lg">
         <BattleScene
@@ -298,7 +372,9 @@ function BattleView({
           attackerSlot={attackerSlot}
           defenderSlot={defenderSlot}
           animationType={animationType}
+          moveAnimProfile={moveAnimProfile}
           phase={phase}
+          faintingInfo={faintingInfo}
         />
 
         {storePhase === "battle" && !snapshot.winner && !animating && (
@@ -321,7 +397,7 @@ function BattleView({
       </div>
 
       <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_2fr]">
-        <PartyBar player={snapshot.players[yourSlot]} side="left" />
+        <PartyBar player={effectiveSnapshot.players[yourSlot]} side="left" />
 
         {storePhase === "battle" && isYourTurn && (
           <CommandPanel
