@@ -3,26 +3,21 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-function newRoomId() {
-  return Math.random().toString(36).slice(2, 8);
-}
-
 export default function HomePage() {
   const router = useRouter();
   const [name, setName] = useState("");
-  const [room, setRoom] = useState("");
-
-  function create() {
-    const id = newRoomId();
-    const n = name.trim() || "プレイヤー";
-    router.push(`/battle/${id}?name=${encodeURIComponent(n)}`);
-  }
+  const [password, setPassword] = useState("");
 
   function join() {
-    const id = room.trim();
-    if (!id) return;
+    const pw = password.trim();
+    if (!pw) return;
     const n = name.trim() || "プレイヤー";
-    router.push(`/battle/${id}?name=${encodeURIComponent(n)}`);
+    // 合言葉をそのまま roomId として使う。Next.js のパスに渡すので encode する。
+    router.push(`/battle/${encodeURIComponent(pw)}?name=${encodeURIComponent(n)}`);
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") join();
   }
 
   return (
@@ -31,7 +26,7 @@ export default function HomePage() {
         おかえりそのだくん・バトル
       </h1>
       <p className="text-center text-sm text-gray-400">
-        ポケモンスタジアム風の 3D 2 対 2 ターン制対戦
+        ねこのぬいぐるみで対戦するターン制ゲーム
       </p>
 
       <div className="w-full space-y-3 rounded-lg bg-black/40 p-4">
@@ -40,44 +35,41 @@ export default function HomePage() {
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
+            onKeyDown={onKeyDown}
             placeholder="そのだくん"
             className="mt-1 w-full rounded border border-white/20 bg-stadium-bg px-3 py-2 text-white outline-none focus:border-stadium-accent"
           />
         </label>
 
-        <button
-          onClick={create}
-          className="w-full rounded bg-stadium-accent px-4 py-2 font-bold text-white"
-        >
-          ルームを作って対戦相手を待つ
-        </button>
-
-        <div className="flex items-center gap-2 text-xs text-gray-500">
-          <span className="flex-1 border-t border-white/10" />
-          <span>または</span>
-          <span className="flex-1 border-t border-white/10" />
-        </div>
-
         <label className="block text-sm">
-          ルームID
+          合言葉
           <input
-            value={room}
-            onChange={(e) => setRoom(e.target.value)}
-            placeholder="abc123"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="例: にゃんにゃん"
             className="mt-1 w-full rounded border border-white/20 bg-stadium-bg px-3 py-2 text-white outline-none focus:border-stadium-accent"
+            autoComplete="off"
           />
         </label>
+
         <button
           onClick={join}
-          className="w-full rounded border border-stadium-accent px-4 py-2 font-bold text-stadium-accent"
+          disabled={!password.trim()}
+          className="w-full rounded bg-stadium-accent px-4 py-2 font-bold text-white disabled:opacity-40"
         >
-          ルームに参加
+          この合言葉で入室
         </button>
+
+        <p className="pt-1 text-center text-[11px] leading-relaxed text-gray-400">
+          対戦相手にも同じ合言葉を伝えてください。<br />
+          2 人が同じ合言葉で入室するとバトル開始です。
+        </p>
       </div>
 
-      <p className="text-center text-xs text-gray-500">
-        ※ 起動前に <code className="rounded bg-black/50 px-1">npm run dev:server</code> で
-        Socket.io サーバーを立てておいてください。
+      <p className="text-center text-[10px] text-gray-500">
+        合言葉は何でも OK（ひらがな・英数・記号など）。<br />
+        既に 2 人入室済みの合言葉では入れません。
       </p>
     </main>
   );

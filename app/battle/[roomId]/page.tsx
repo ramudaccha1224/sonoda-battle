@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getSocket, disconnectSocket } from "@/lib/net/socket";
 import { useBattleStore } from "@/store/battleStore";
 import { PartySelect } from "@/components/ui/PartySelect";
@@ -32,7 +32,8 @@ const NON_MOVE_MS = 900;  // スイッチ等、技でないアクションの短
 export default function BattleRoomPage() {
   const params = useParams<{ roomId: string }>();
   const search = useSearchParams();
-  const roomId = params.roomId;
+  // URL から取り出した roomId はそのまま「合言葉」として表示する。
+  const roomId = decodeURIComponent(params.roomId);
   const name = search.get("name") ?? "プレイヤー";
 
   const store = useBattleStore();
@@ -44,12 +45,6 @@ export default function BattleRoomPage() {
   const [animationType, setAnimationType] = useState<ActionAnimType | null>(null);
   const [phase, setPhase] = useState<BattlePhase>("idle");
   const [animating, setAnimating] = useState(false);
-
-  // shareUrl はクライアントでしか作れないため、マウント後にセットしてハイドレーションを揃える
-  const [shareUrl, setShareUrl] = useState("");
-  useEffect(() => {
-    setShareUrl(`${window.location.origin}/battle/${roomId}`);
-  }, [roomId]);
 
   // 接続 & イベント購読
   useEffect(() => {
@@ -168,15 +163,15 @@ export default function BattleRoomPage() {
   return (
     <main className="relative grid h-screen grid-rows-[auto_1fr_auto] bg-stadium-bg">
       <header className="flex items-center justify-between bg-black/40 px-4 py-2 text-sm">
-        <div>
-          <span className="text-gray-400">ルーム:</span>{" "}
+        <div className="min-w-0">
+          <span className="text-gray-400">合言葉:</span>{" "}
           <span className="font-mono">{roomId}</span>
           <button
-            onClick={() => navigator.clipboard?.writeText(shareUrl)}
+            onClick={() => navigator.clipboard?.writeText(roomId)}
             className="ml-2 rounded bg-white/10 px-2 py-0.5 text-xs hover:bg-white/20"
-            title="共有URLをコピー"
+            title="合言葉をコピー"
           >
-            URLコピー
+            合言葉コピー
           </button>
         </div>
         <div className="text-xs text-gray-400">
@@ -185,13 +180,12 @@ export default function BattleRoomPage() {
       </header>
 
       <section className="relative">
-        {store.errorMessage && (
-          <div className="absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded bg-red-600 px-3 py-1 text-sm">
-            {store.errorMessage}
-          </div>
-        )}
+        {/* 致命的エラー (ルーム満員など) は中央にモーダル */}
+        {store.errorMessage && <ErrorModal message={store.errorMessage} />}
 
-        {store.phase === "lobby" && <LobbyView shareUrl={shareUrl} />}
+        {store.phase === "lobby" && !store.errorMessage && (
+          <LobbyView roomId={roomId} />
+        )}
 
         {store.phase === "party-select" && store.yourSlot && (
           <div className="mx-auto max-w-3xl px-4 py-6">
@@ -228,22 +222,43 @@ export default function BattleRoomPage() {
   );
 }
 
-function LobbyView({ shareUrl }: { shareUrl: string }) {
+function LobbyView({ roomId }: { roomId: string }) {
   const store = useBattleStore();
   return (
-    <div className="grid h-full place-items-center">
-      <div className="space-y-3 rounded-lg bg-black/50 p-6 text-center">
+    <div className="grid h-full place-items-center px-4">
+      <div className="space-y-4 rounded-lg bg-black/50 p-6 text-center max-w-md">
         <div className="text-lg font-bold">対戦相手を待っています…</div>
-        <div className="text-xs text-gray-400">
-          このURLを相手に共有してください
+        <div>
+          <div className="text-xs text-gray-400 mb-1">
+            この合言葉を相手に伝えてください
+          </div>
+          <code className="block break-all rounded bg-stadium-bg p-3 text-base font-bold tracking-wider text-stadium-accent">
+            {roomId}
+          </code>
         </div>
-        <code className="block break-all rounded bg-stadium-bg p-2 text-xs">
-          {shareUrl}
-        </code>
         <div className="text-xs text-gray-500">
           現在の参加者: {store.players.p1 ?? "（空き）"} /{" "}
           {store.players.p2 ?? "（空き）"}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ErrorModal({ message }: { message: string }) {
+  const router = useRouter();
+  // ルーム満員などのエラーはホームに戻す
+  return (
+    <div className="grid h-full place-items-center px-4">
+      <div className="space-y-4 rounded-lg bg-black/80 p-6 text-center max-w-md ring-1 ring-red-500/60">
+        <div className="text-2xl">😿</div>
+        <div className="text-base font-bold text-red-300">{message}</div>
+        <button
+          onClick={() => router.push("/")}
+          className="rounded bg-stadium-accent px-4 py-2 text-sm font-bold text-white"
+        >
+          ホームに戻る
+        </button>
       </div>
     </div>
   );
