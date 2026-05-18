@@ -32,6 +32,11 @@ interface Player {
   name: string;
   partyIds: [MonsterId, MonsterId] | null;
   pendingCommand: Command | null;
+  /**
+   * バトル中の切断時に握る再接続猶予タイマー。
+   * 猶予内に同じ name で room:join すれば slot を取り戻せる。
+   */
+  reconnectTimer?: NodeJS.Timeout;
 }
 
 interface Room {
@@ -41,6 +46,9 @@ interface Room {
   engine: BattleEngine | null;
   phase: "lobby" | "party-select" | "battle" | "ended";
 }
+
+/** バトル中の切断 → 再接続猶予 (ms)。これを過ぎたら完全離脱扱い。 */
+const RECONNECT_GRACE_MS = 60_000;
 
 const rooms = new Map<string, Room>();
 
@@ -98,6 +106,40 @@ io.on("connection", (socket) => {
 
   socket.on("room:join", ({ roomId, name }) => {
     const room = getOrCreateRoom(roomId);
+
+    // 1) バトル中の再接続を最優先で扱う。
+    //    engine 生存中 & 同じ name の slot があり、そこの socket がもう生きていなければ
+    //    その slot を取り戻して battle:start を再送する。
+    if (room.engine) {
+      for (const cand of ["p1", "p2"] as const) {
+        const player = room[cand];
+        if (!player || player.name !== name) continue;
+        const liveSock = io.sockets.sockets.get(player.socketId);
+        if (liveSock && liveSock.connected && player.socketId !== socket.id) {
+          // この slot は別の生きてる socket がまだ使ってる。横取りしない。
+          continue;
+        }
+        // 再接続として slot を引き継ぐ
+        player.socketId = socket.id;
+        if (player.reconnectTimer) {
+          clearTimeout(player.reconnectTimer);
+          player.reconnectTimer = undefined;
+        }
+        socket.join(roomId);
+        socket.emit("room:joined", {
+          roomId,
+          yourSlot: cand,
+          players: { p1: room.p1?.name ?? null, p2: room.p2?.name ?? null },
+        });
+        broadcastRoomState(io, room);
+        // 現在の盤面を渡してクライアント側 stuck state（commandSubmitted 等）をリセットさせる
+        socket.emit("battle:start", { snapshot: room.engine.snapshot() });
+        console.log(`[~] ${socket.id} reclaimed ${cand} (${name}) in room ${roomId}`);
+        return;
+      }
+    }
+
+    // 2) 通常新規参加
     const fresh: Player = { socketId: socket.id, name, partyIds: null, pendingCommand: null };
 
     let slot: PlayerSlot;
@@ -154,19 +196,38 @@ io.on("connection", (socket) => {
 
   socket.on("battle:submit_command", ({ roomId, command }) => {
     const room = rooms.get(roomId);
-    if (!room || !room.engine) return;
+    if (!room || !room.engine) {
+      console.warn(`[!] submit_command for ${roomId} but engine is gone (socket=${socket.id})`);
+      return;
+    }
     const slot = slotOf(room, socket.id);
-    if (!slot) return;
+    if (!slot) {
+      console.warn(`[!] submit_command from unknown socket ${socket.id} in ${roomId}`);
+      return;
+    }
 
     // 同一ラウンドで再送信された場合は前のを上書き
     room[slot]!.pendingCommand = command;
+    console.log(`[>] ${slot} (${socket.id}) submitted in ${roomId}: ${command.type}`);
 
     const cmdP1 = room.p1?.pendingCommand;
     const cmdP2 = room.p2?.pendingCommand;
 
     if (cmdP1 && cmdP2) {
-      // 両方揃ったのでラウンドを解決
-      const result = room.engine.resolveRound(cmdP1, cmdP2);
+      // 両方揃ったのでラウンドを解決。engine 例外で握り潰されないよう try/catch。
+      let result;
+      try {
+        result = room.engine.resolveRound(cmdP1, cmdP2);
+      } catch (err) {
+        console.error(`[!] resolveRound failed for ${roomId}:`, err);
+        // 両者にエラーを通知し、pendingCommand はクリアして再入力を促す
+        room.p1!.pendingCommand = null;
+        room.p2!.pendingCommand = null;
+        io.to(roomId).emit("error:msg", {
+          message: "バトル処理でエラーが発生しました。ページを再読み込みしてください。",
+        });
+        return;
+      }
       room.p1!.pendingCommand = null;
       room.p2!.pendingCommand = null;
       io.to(roomId).emit("battle:round_resolved", result);
@@ -186,7 +247,33 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log(`[-] ${socket.id} disconnected`);
     for (const room of rooms.values()) {
-      if (slotOf(room, socket.id)) leave(room.id, socket.id);
+      const slot = slotOf(room, socket.id);
+      if (!slot) continue;
+
+      // バトル中の切断は engine を破棄しない。猶予期間内に
+      // 同じ name で再接続したら room:join 側で slot を取り戻す。
+      // 猶予を過ぎたら本当に離脱して engine を破棄する。
+      if (room.engine && room.phase !== "ended") {
+        console.log(
+          `[~] ${socket.id} (${slot}) disconnected during battle; waiting up to ${RECONNECT_GRACE_MS}ms for reconnect`,
+        );
+        const player = room[slot]!;
+        if (player.reconnectTimer) clearTimeout(player.reconnectTimer);
+        player.reconnectTimer = setTimeout(() => {
+          // 猶予内に戻ってこなかった。完全離脱。
+          // ただしこの間に再接続して別 socket が slot を握っていたら何もしない。
+          const stillSamePlayer =
+            room[slot] && room[slot]!.socketId === socket.id;
+          if (stillSamePlayer) {
+            console.log(`[x] ${socket.id} (${slot}) reconnect grace expired`);
+            leave(room.id, socket.id);
+          }
+        }, RECONNECT_GRACE_MS);
+        continue;
+      }
+
+      // バトル外（lobby / party-select / ended）はすぐ離脱
+      leave(room.id, socket.id);
     }
   });
 
@@ -195,6 +282,10 @@ io.on("connection", (socket) => {
     if (!room) return;
     const slot = slotOf(room, socketId);
     if (!slot) return;
+    // 念のため reconnectTimer を片付け
+    if (room[slot]?.reconnectTimer) {
+      clearTimeout(room[slot]!.reconnectTimer);
+    }
     room[slot] = null;
     if (!room.p1 && !room.p2) {
       rooms.delete(roomId);

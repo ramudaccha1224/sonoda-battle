@@ -210,6 +210,19 @@ export default function BattleRoomPage() {
       store.setRoomState(st);
     });
     s.on("battle:start", ({ snapshot }) => {
+      // 通常のバトル開始だけでなく、サーバ側からの再接続復帰時にも飛んでくる。
+      // 中途半端な animation 状態が残らないよう、進行中だった演出は全部リセットする。
+      pendingActionsRef.current = [];
+      roundFinalSnapshotRef.current = null;
+      prevSnapshotForActionRef.current = null;
+      setAnimating(false);
+      setDamagedSlot(null);
+      setAttackerSlot(null);
+      setDefenderSlot(null);
+      setAnimationType(null);
+      setMoveAnimProfile(null);
+      setPhase("idle");
+      setFaintingInfo(null);
       store.setSnapshot(snapshot);
     });
 
