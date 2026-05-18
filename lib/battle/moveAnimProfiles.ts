@@ -20,7 +20,6 @@ export const MOVE_ANIM_PROFILES: Record<string, MoveAnimProfile> = {
   },
   shippo_aisatsu: {
     attackerMotion: "tail_swing",
-    impactExtra: "dizzy_stars",
   },
   okaeri_tackle: {
     attackerMotion: "high_jump_dive",
@@ -71,7 +70,8 @@ export const MOVE_ANIM_PROFILES: Record<string, MoveAnimProfile> = {
   },
   nekojarashi_honro: {
     attackerMotion: "spin_dance",
-    emit: { kind: "sparkles", color: "#ffd966" },
+    emit: { kind: "cloud", color: "#7fcf5c" },
+    impactExtra: "dizzy_stars",
   },
   kashakasha_attack: {
     attackerMotion: "claw_swipe",

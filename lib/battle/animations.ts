@@ -46,9 +46,10 @@ export function classifyMoveAnim(move: MoveDefinition): ActionAnimType {
     case "cure_status":
     case "protect":
       return "self_support";
-    case "heal_both":
+    case "heal_all_alive":
       return "shared_aura";
     case "stat_change":
+    case "flat_stat_bonus":
       return eff.target === "self" ? "self_support" : "opponent_curse";
     case "inflict_status":
       return "opponent_curse";

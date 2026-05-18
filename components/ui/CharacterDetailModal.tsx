@@ -110,27 +110,60 @@ function ProfileRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function movePowerLabel(move: MoveDefinition): string {
+  if (move.fixedDamage != null) return `${move.fixedDamage}固定`;
+  if (move.instantKo) return "—";
+  if (move.timeConditionalPower) {
+    return `昼${move.timeConditionalPower.day}/夜${move.timeConditionalPower.night}`;
+  }
+  if (move.effects?.some((e) => e.kind === "body_press")) return "防御依存";
+  return move.power > 0 ? String(move.power) : "—";
+}
+
+function specialFlagsHint(move: MoveDefinition): string[] {
+  const out: string[] = [];
+  if (move.fixedDamage != null) out.push(`固定 ${move.fixedDamage} ダメージ`);
+  if (move.instantKo) out.push("命中で一撃即死");
+  if (move.timeConditionalPower) {
+    out.push(`昼威力${move.timeConditionalPower.day} / 夜威力${move.timeConditionalPower.night}`);
+  }
+  if (move.setTimeOfDay) {
+    out.push(move.setTimeOfDay === "night" ? "時間帯→夜" : "時間帯→昼");
+  }
+  if (move.physicalCounter) {
+    out.push(
+      `HP -${move.physicalCounter.hpCostPercent}% / 同ラウンドの物理を ×${move.physicalCounter.multiplier} 反射`,
+    );
+  }
+  return out;
+}
+
 function MoveCard({ move }: { move: MoveDefinition }) {
-  const power = move.power > 0 ? move.power : "—";
-  const accuracy = move.alwaysHit ? "必中" : move.accuracy;
   const cat =
     move.category === "physical" ? "物理" :
     move.category === "special" ? "特殊" : "変化";
+  const flags = specialFlagsHint(move);
   return (
     <div className="rounded-lg bg-black/40 p-2">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3">
         <div className="font-bold text-white">{move.name}</div>
         <div className="text-[10px] text-gray-400">
-          {cat}
-          {move.priority ? "・先制" : ""}
-          ／威 {power}／命 {accuracy}／PP {move.pp}
+          {cat}／威 {movePowerLabel(move)}／命 {move.accuracy}／PP {move.pp}
         </div>
       </div>
-      {move.effects && move.effects.length > 0 && (
+      {(flags.length > 0 || (move.effects && move.effects.length > 0)) && (
         <div className="mt-1 flex flex-wrap gap-1">
-          {move.effects.map((e, i) => (
+          {flags.map((s, i) => (
             <span
-              key={i}
+              key={`sp-${i}`}
+              className="rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] text-rose-300"
+            >
+              {s}
+            </span>
+          ))}
+          {move.effects?.map((e, i) => (
+            <span
+              key={`ef-${i}`}
               className="rounded bg-stadium-accent/15 px-1.5 py-0.5 text-[10px] text-stadium-accent"
             >
               {effectLabel(e)}
@@ -152,22 +185,25 @@ const STAT_LABEL_SHORT: Record<string, string> = {
 };
 
 const STATUS_LABEL_SHORT: Record<string, string> = {
-  paralysis: "まひ",
   confusion: "こんらん",
-  sleep: "ねむり",
-  drowsy: "うとうと",
 };
 
 function effectLabel(effect: MoveEffect): string {
   switch (effect.kind) {
     case "heal_self":
-      return `HP +${effect.percent}%`;
-    case "heal_both":
-      return `双方 HP +${effect.percent}%`;
+      if (effect.flat != null) return `HP +${effect.flat}`;
+      return `HP +${effect.percent ?? 0}%`;
+    case "heal_all_alive":
+      return `全員 HP +${effect.percent}%`;
     case "stat_change": {
       const who = effect.target === "self" ? "自分" : "相手";
       const sign = effect.stages > 0 ? "↑" : "↓";
       return `${who}${STAT_LABEL_SHORT[effect.stat]}${sign}${Math.abs(effect.stages)}`;
+    }
+    case "flat_stat_bonus": {
+      const who = effect.target === "self" ? "自" : "相";
+      const sign = effect.amount >= 0 ? "+" : "";
+      return `${who}${STAT_LABEL_SHORT[effect.stat]} ${sign}${effect.amount}`;
     }
     case "recoil":
       return `反動 ${Math.round(effect.ratio * 100)}%`;
@@ -183,7 +219,5 @@ function effectLabel(effect: MoveEffect): string {
       return `ひるみ ${effect.chance}%`;
     case "cure_status":
       return "状態異常を治す";
-    case "random_extra":
-      return "ランダム追加効果";
   }
 }

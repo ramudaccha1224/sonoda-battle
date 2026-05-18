@@ -158,12 +158,25 @@ io.on("connection", (socket) => {
     const slot = slotOf(room, socket.id);
     if (!slot) return;
 
-    // 自分のターンでなければ受け付けない
-    if (slot !== room.engine.turnOf) return;
+    // 同一ラウンドで再送信された場合は前のを上書き
+    room[slot]!.pendingCommand = command;
 
-    const result = room.engine.executeAction(slot, command);
-    io.to(roomId).emit("battle:turn_resolved", result);
-    if (result.snapshot.winner) room.phase = "ended";
+    const cmdP1 = room.p1?.pendingCommand;
+    const cmdP2 = room.p2?.pendingCommand;
+
+    if (cmdP1 && cmdP2) {
+      // 両方揃ったのでラウンドを解決
+      const result = room.engine.resolveRound(cmdP1, cmdP2);
+      room.p1!.pendingCommand = null;
+      room.p2!.pendingCommand = null;
+      io.to(roomId).emit("battle:round_resolved", result);
+      if (result.snapshot.winner) room.phase = "ended";
+    } else {
+      // まだ相手が選んでない → 相手側に「決まったよ」通知
+      const other: PlayerSlot = slot === "p1" ? "p2" : "p1";
+      const otherSocketId = room[other]?.socketId;
+      if (otherSocketId) io.to(otherSocketId).emit("battle:opponent_committed");
+    }
   });
 
   socket.on("room:leave", ({ roomId }) => {

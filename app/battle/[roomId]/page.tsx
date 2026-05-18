@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getSocket, disconnectSocket } from "@/lib/net/socket";
 import { useBattleStore } from "@/store/battleStore";
@@ -9,7 +9,12 @@ import { PartySelect } from "@/components/ui/PartySelect";
 import { CommandPanel } from "@/components/ui/CommandPanel";
 import { BattleLog } from "@/components/ui/BattleLog";
 import { PartyBar } from "@/components/ui/PartyBar";
-import type { Command, MonsterId, PlayerSlot } from "@/lib/battle/types";
+import type {
+  ActionResult,
+  Command,
+  MonsterId,
+  PlayerSlot,
+} from "@/lib/battle/types";
 import {
   classifyMoveAnim,
   type ActionAnimType,
@@ -56,6 +61,140 @@ export default function BattleRoomPage() {
     stage: "reaction" | "fading";
   } | null>(null);
 
+  // ラウンド進行用の ref 群
+  const pendingActionsRef = useRef<ActionResult[]>([]);
+  const prevSnapshotForActionRef = useRef<ReturnType<typeof useBattleStore.getState>["snapshot"]>(null);
+  const roundFinalSnapshotRef = useRef<ReturnType<typeof useBattleStore.getState>["snapshot"]>(null);
+  const playNextActionRef = useRef<(() => void) | null>(null);
+
+  // ============================================================
+  // playOneAction / playNextAction
+  // ============================================================
+  // 1 アクション分のアニメーションを再生する。完了したら onComplete を呼ぶ。
+  function playOneAction(action: ActionResult, onComplete: () => void) {
+    const moveEvent = action.events.find((e) => e.kind === "move");
+    const damageHit = action.events.find(
+      (e) => e.kind === "move" && !e.missed && e.damage > 0,
+    );
+    const faintEvent = action.events.find(
+      (e) => e.kind === "faint",
+    );
+
+    // 移動 (move) 以外のアクション (switch 等) は短い演出だけして次へ
+    if (!moveEvent || moveEvent.kind !== "move") {
+      store.applySnapshotPartial(action.snapshotAfter, action.events);
+      const t = setTimeout(onComplete, NON_MOVE_MS);
+      return () => clearTimeout(t);
+    }
+
+    const moveId = moveEvent.moveId;
+    const move = getMove(moveId);
+    const animType = classifyMoveAnim(move);
+    const actor = action.actor;
+    const target: PlayerSlot = actor === "p1" ? "p2" : "p1";
+
+    // 倒れる予定のモンスター: このアクション直前のスナップショットの活性 index
+    const prevSnap = prevSnapshotForActionRef.current;
+    const prevDefenderActiveIdx = prevSnap?.players[target]?.activeIndex ?? null;
+    const willFaint =
+      !!faintEvent &&
+      faintEvent.kind === "faint" &&
+      faintEvent.actor === target &&
+      prevDefenderActiveIdx != null;
+    const faintingPartyIdx = willFaint ? prevDefenderActiveIdx! : null;
+
+    setAttackerSlot(actor);
+    setDefenderSlot(target);
+    setAnimationType(animType);
+    setMoveAnimProfile(getMoveAnimProfile(moveId));
+    setPhase("approach");
+
+    // ダメージ反映タイミング
+    const damageApplyAt = damageHit
+      ? animType === "physical_attack"
+        ? APPROACH_MS + 300
+        : APPROACH_MS + IMPACT_MS * 0.6
+      : APPROACH_MS + IMPACT_MS / 2;
+
+    // ダメージなし技は reaction を短くして演出感を保つ
+    const reactionMs = damageHit ? REACTION_MS : 1000;
+
+    const tids: ReturnType<typeof setTimeout>[] = [];
+
+    tids.push(setTimeout(() => setPhase("impact"), APPROACH_MS));
+
+    tids.push(
+      setTimeout(() => {
+        if (damageHit) setDamagedSlot(target);
+        if (faintingPartyIdx != null) {
+          setFaintingInfo({
+            slot: target,
+            partyIndex: faintingPartyIdx,
+            stage: "reaction",
+          });
+        }
+        // このアクション直後の状態を反映 (HP が減り始める)
+        store.applySnapshotPartial(action.snapshotAfter, action.events);
+        setPhase("reaction");
+      }, damageApplyAt),
+    );
+
+    const tReactionEnd = damageApplyAt + reactionMs;
+    tids.push(
+      setTimeout(() => {
+        setDamagedSlot(null);
+        if (faintingPartyIdx != null) {
+          setFaintingInfo({
+            slot: target,
+            partyIndex: faintingPartyIdx,
+            stage: "fading",
+          });
+          setPhase("faint");
+        }
+      }, tReactionEnd),
+    );
+
+    const tEnd =
+      faintingPartyIdx != null ? tReactionEnd + FAINT_MS : tReactionEnd;
+    tids.push(
+      setTimeout(() => {
+        setPhase("idle");
+        setAttackerSlot(null);
+        setDefenderSlot(null);
+        setAnimationType(null);
+        setMoveAnimProfile(null);
+        setDamagedSlot(null);
+        setFaintingInfo(null);
+        // 次のアクションの prev は、このアクションが終わった時点のスナップショット
+        prevSnapshotForActionRef.current = action.snapshotAfter;
+        onComplete();
+      }, tEnd),
+    );
+
+    return () => {
+      tids.forEach(clearTimeout);
+    };
+  }
+
+  // playNextActionRef.current にセット (キューから 1 件取り出して再生)
+  useEffect(() => {
+    playNextActionRef.current = () => {
+      const queue = pendingActionsRef.current;
+      const next = queue.shift();
+      if (!next) {
+        // ラウンド終了
+        const fs = roundFinalSnapshotRef.current;
+        if (fs) {
+          store.endRound(fs, []);
+        }
+        setAnimating(false);
+        return;
+      }
+      playOneAction(next, () => playNextActionRef.current?.());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 接続 & イベント購読
   useEffect(() => {
     const s = getSocket();
@@ -74,118 +213,21 @@ export default function BattleRoomPage() {
       store.setSnapshot(snapshot);
     });
 
-    s.on("battle:turn_resolved", ({ snapshot, events }) => {
-      // どの技が使われたか取得
-      const moveEvent = events.find((e) => e.kind === "move");
-      const moveId = moveEvent && moveEvent.kind === "move" ? moveEvent.moveId : null;
-      const move = moveId ? getMove(moveId) : null;
+    s.on("battle:opponent_committed", () => {
+      useBattleStore.getState().setOpponentCommitted(true);
+    });
 
-      // ダメージが入る技か
-      const damageHit = events.find(
-        (e) => e.kind === "move" && !e.missed && e.damage > 0,
-      );
-      // ひんしが起きたか（被弾側）
-      const faintEvent = events.find((e) => e.kind === "faint");
+    s.on("battle:round_resolved", ({ actions, snapshot: finalSnapshot }) => {
+      // 受信時に直前のスナップショット（このラウンドの前）を控えておく。
+      // 各アクションは prevSnapshot を見て「死にゆくモンスターの index」を計算する。
+      const initialSnapshot = useBattleStore.getState().snapshot;
+      pendingActionsRef.current = [...actions];
+      prevSnapshotForActionRef.current = initialSnapshot ?? finalSnapshot;
+      roundFinalSnapshotRef.current = finalSnapshot;
+      setAnimating(true);
 
-      if (move && moveEvent && moveEvent.kind === "move") {
-        const animType = classifyMoveAnim(move);
-        const actor = moveEvent.actor;
-        const target: PlayerSlot = actor === "p1" ? "p2" : "p1";
-
-        // 倒れる予定のモンスターの party index を取り出す。
-        // 直前 (このターン前) の被弾側 activeIndex がそのまま倒れた個体。
-        const prevSnap = useBattleStore.getState().snapshot;
-        const prevDefenderActiveIdx = prevSnap?.players[target]?.activeIndex ?? null;
-        const willFaint =
-          !!faintEvent &&
-          faintEvent.kind === "faint" &&
-          faintEvent.actor === target &&
-          prevDefenderActiveIdx != null;
-        const faintingPartyIdx = willFaint ? prevDefenderActiveIdx! : null;
-
-        setAnimating(true);
-        setAttackerSlot(actor);
-        setDefenderSlot(target);
-        setAnimationType(animType);
-        setMoveAnimProfile(getMoveAnimProfile(moveId!));
-
-        // === Phase 1: APPROACH ===
-        setPhase("approach");
-
-        // ダメージ反映タイミング
-        const damageApplyAt = damageHit
-          ? animType === "physical_attack"
-            ? APPROACH_MS + 300
-            : APPROACH_MS + IMPACT_MS * 0.6
-          : APPROACH_MS + IMPACT_MS / 2;
-
-        const tids: ReturnType<typeof setTimeout>[] = [];
-
-        // → impact phase
-        tids.push(
-          setTimeout(() => setPhase("impact"), APPROACH_MS),
-        );
-
-        // ヒット時: ダメージ適用 + reaction phase 開始
-        tids.push(
-          setTimeout(() => {
-            if (damageHit) setDamagedSlot(target);
-            // ひんし予定なら、倒れていく方を引き続き描画するための override をセット。
-            if (faintingPartyIdx != null) {
-              setFaintingInfo({
-                slot: target,
-                partyIndex: faintingPartyIdx,
-                stage: "reaction",
-              });
-            }
-            store.applyTurn(snapshot, events);
-            setPhase("reaction");
-          }, damageApplyAt),
-        );
-
-        // reaction 終了
-        const tReactionEnd = damageApplyAt + REACTION_MS;
-        tids.push(
-          setTimeout(() => {
-            // ＞＜ 揺れ表示は終了。
-            setDamagedSlot(null);
-            if (faintingPartyIdx != null) {
-              // → faint phase: 倒れる + フェード
-              setFaintingInfo({
-                slot: target,
-                partyIndex: faintingPartyIdx,
-                stage: "fading",
-              });
-              setPhase("faint");
-            }
-          }, tReactionEnd),
-        );
-
-        // 全終了
-        const tEnd = faintingPartyIdx != null ? tReactionEnd + FAINT_MS : tReactionEnd;
-        tids.push(
-          setTimeout(() => {
-            setPhase("idle");
-            setAttackerSlot(null);
-            setDefenderSlot(null);
-            setAnimationType(null);
-            setMoveAnimProfile(null);
-            setDamagedSlot(null);
-            setFaintingInfo(null);
-            setAnimating(false);
-          }, tEnd),
-        );
-
-        return () => {
-          tids.forEach(clearTimeout);
-        };
-      } else {
-        // 技イベントなし（switch のみ等）: 短い演出
-        setAnimating(true);
-        store.applyTurn(snapshot, events);
-        const t = setTimeout(() => setAnimating(false), NON_MOVE_MS);
-        return () => clearTimeout(t);
-      }
+      // 最初のアクションから順番に再生
+      playNextActionRef.current?.();
     });
 
     s.on("error:msg", ({ message }) => {
@@ -206,6 +248,8 @@ export default function BattleRoomPage() {
   }
   function submitCommand(cmd: Command) {
     if (animating) return;
+    if (store.commandSubmitted) return;
+    store.setCommandSubmitted(true);
     getSocket().emit("battle:submit_command", { roomId, command: cmd });
   }
 
@@ -223,8 +267,20 @@ export default function BattleRoomPage() {
             合言葉コピー
           </button>
         </div>
-        <div className="text-xs text-gray-400">
-          {store.players.p1 ?? "（空き）"} vs {store.players.p2 ?? "（空き）"}
+        <div className="flex items-center gap-3 text-xs text-gray-400">
+          {store.snapshot && (
+            <span
+              className={
+                store.snapshot.timeOfDay === "night"
+                  ? "rounded-full bg-indigo-900/70 px-2 py-0.5 text-indigo-100"
+                  : "rounded-full bg-amber-200/30 px-2 py-0.5 text-amber-100"
+              }
+              title="戦闘中の時間帯"
+            >
+              {store.snapshot.timeOfDay === "night" ? "🌙 夜" : "☀️ 昼"}
+            </span>
+          )}
+          <span>{store.players.p1 ?? "（空き）"} vs {store.players.p2 ?? "（空き）"}</span>
         </div>
       </header>
 
@@ -338,10 +394,15 @@ function BattleView({
     | null;
   onSubmit: (cmd: Command) => void;
 }) {
-  const { snapshot, yourSlot, phase: storePhase } = useBattleStore();
+  const {
+    snapshot,
+    yourSlot,
+    phase: storePhase,
+    commandSubmitted,
+    opponentCommitted,
+  } = useBattleStore();
   if (!snapshot || !yourSlot) return null;
   const opponent: PlayerSlot = yourSlot === "p1" ? "p2" : "p1";
-  const isYourTurn = snapshot.currentTurnSlot === yourSlot;
 
   // 倒れていく方を「現役」として PartyBar にも反映させるための実効スナップショット。
   // これで HP ゲージや active ハイライトが、3 秒 reaction の間ずっと
@@ -378,14 +439,12 @@ function BattleView({
         />
 
         {storePhase === "battle" && !snapshot.winner && !animating && (
-          <div
-            className={`absolute left-1/2 top-3 -translate-x-1/2 rounded-full px-4 py-1 text-sm font-bold shadow-lg ${
-              isYourTurn
-                ? "bg-stadium-accent text-white"
-                : "bg-black/70 text-gray-200"
-            }`}
-          >
-            {isYourTurn ? "あなたのターン" : "相手のターン…"}
+          <div className="absolute left-1/2 top-3 -translate-x-1/2 rounded-full bg-black/60 px-4 py-1 text-xs text-gray-200 shadow-lg">
+            {commandSubmitted
+              ? "相手を待っています…"
+              : opponentCommitted
+                ? "相手は技を決めました。あなたの番です"
+                : "技を選んでください"}
           </div>
         )}
 
@@ -399,18 +458,14 @@ function BattleView({
       <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_2fr]">
         <PartyBar player={effectiveSnapshot.players[yourSlot]} side="left" />
 
-        {storePhase === "battle" && isYourTurn && (
+        {storePhase === "battle" && (
           <CommandPanel
             snapshot={snapshot}
             yourSlot={yourSlot}
-            disabled={animating}
+            disabled={animating || commandSubmitted}
+            opponentCommitted={opponentCommitted && !commandSubmitted}
             onSubmit={onSubmit}
           />
-        )}
-        {storePhase === "battle" && !isYourTurn && (
-          <div className="grid place-items-center rounded-lg bg-black/70 p-4 text-center text-sm text-gray-300 backdrop-blur">
-            相手のターンです…
-          </div>
         )}
       </div>
     </div>

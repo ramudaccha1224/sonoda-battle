@@ -28,6 +28,11 @@ export class Monster {
   protectedThisTurn = false;
   /** このターン中に「ひるみ」を受けているか */
   flinchedThisTurn = false;
+  /**
+   * このラウンド中、相手の物理攻撃を反射するスタンスを取っているか。
+   * くろねこのまじない使用時にセット。1 回反射すると消費。ラウンド終了でもクリア。
+   */
+  pendingPhysicalCounter: { multiplier: number } | null = null;
 
   constructor(state: MonsterState) {
     this.state = state;
@@ -42,11 +47,23 @@ export class Monster {
   get isFainted() { return this.state.fainted || this.state.currentHp <= 0; }
   get status(): StatusCondition | null { return this.state.status; }
 
-  /** 能力段階を加味した実効ステータス。HP は段階の対象外。 */
+  /**
+   * 能力段階 + フラットボーナスを加味した実効ステータス。
+   * effective = floor((base + flatBonus) × stageMultiplier(stage))。
+   * HP は対象外。
+   */
   effective(stat: StatName): number {
     const base = this.stats[stat];
     const stage = this.state.stages[stat];
-    return Math.max(1, Math.floor(base * stageMultiplier(stage)));
+    const bonus = this.state.statBonus[stat];
+    return Math.max(1, Math.floor((base + bonus) * stageMultiplier(stage)));
+  }
+
+  /** フラット加算ボーナスを変化させる。実際に変化した量を返す。 */
+  changeFlatStat(stat: StatName, delta: number): number {
+    const before = this.state.statBonus[stat];
+    this.state.statBonus[stat] = before + delta;
+    return delta;
   }
 
   /** この個体が覚えている技 */
@@ -81,9 +98,9 @@ export class Monster {
     return next - before;
   }
 
-  /** 状態異常を適用。既に何か状態があれば失敗（false）。 drowsy→sleep への昇格は別扱い。 */
+  /** 状態異常を適用。既に何か状態があれば失敗（false）。 */
   applyStatus(status: StatusCondition, turns: number): boolean {
-    if (this.state.status && this.state.status !== "drowsy") return false;
+    if (this.state.status) return false;
     this.state.status = status;
     this.state.statusTurns = turns;
     return true;
@@ -97,9 +114,10 @@ export class Monster {
     return true;
   }
 
-  /** ターン開始時のフラグをリセット */
+  /** ラウンド開始時のフラグをリセット */
   resetTurnFlags(): void {
     this.protectedThisTurn = false;
     this.flinchedThisTurn = false;
+    this.pendingPhysicalCounter = null;
   }
 }

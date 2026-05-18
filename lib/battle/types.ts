@@ -21,30 +21,29 @@ export type StatName =
   | "speed";
 
 /** 状態異常。null = なし。 */
-export type StatusCondition =
-  | "paralysis"  // まひ: 25% で行動失敗
-  | "confusion" // こんらん: 33% で自分を攻撃
-  | "sleep"     // ねむり: 1〜3 ターン行動不能
-  | "drowsy";   // うとうと: 次のターンに ねむり に移行
+export type StatusCondition = "confusion"; // 50% で自分を攻撃、2〜3 ラウンド
+
+/** 時間帯 */
+export type TimeOfDay = "day" | "night";
 
 /**
  * 技の追加効果。1 つの技に複数つけられる。
  *
- * - heal_self     : 使用者の HP を percent% 回復
- * - heal_both     : 双方の HP を percent% 回復（そのだ「いっしょにお昼寝」）
- * - stat_change   : 能力ランクを ±段階だけ変える
- * - recoil        : 与えたダメージの ratio を自分に反動として受ける
- * - multi_hit     : 同じ技を min〜max 回ヒットさせる（みむら「ひっかき乱舞」）
- * - body_press    : ダメージ計算で自分の防御を攻撃として使う（おぐり「ごろんごろん体当たり」）
- * - protect       : このターンの相手の攻撃を無効化する（おぐり「まるまりシールド」）
- * - inflict_status: 状態異常を chance% で付与
- * - flinch        : chance% で相手を「ひるみ」状態（このターン後攻なら動けない）
- * - cure_status   : 使用者の状態異常を全て治す
- * - random_extra  : ダメージ後にランダムな副次効果を発生させる
+ * - heal_self           : 使用者の HP を percent% (or 固定値) 回復
+ * - heal_all_alive      : 場と控え合わせて死亡していない全モンスターの HP を percent% 回復
+ * - stat_change         : 能力ランクを ±段階だけ変える（倍率制）
+ * - flat_stat_bonus     : 能力値そのものに amount を加算（おぐりの「防御+30」等）
+ * - recoil              : 与えたダメージの ratio を自分に反動として受ける
+ * - multi_hit           : 同じ技を min〜max 回ヒットさせる
+ * - body_press          : ダメージ = 自分の防御値（フォーミュラを使わず、その時点の防御をそのまま投げつける）
+ * - protect             : このラウンドの相手の攻撃を無効化する
+ * - inflict_status      : 状態異常を chance% で付与
+ * - flinch              : chance% で相手を「ひるみ」状態（同ラウンドで後攻なら動けない）
+ * - cure_status         : 使用者の状態異常を全て治す
  */
 export type MoveEffect =
-  | { kind: "heal_self"; percent: number }
-  | { kind: "heal_both"; percent: number }
+  | { kind: "heal_self"; percent?: number; flat?: number }
+  | { kind: "heal_all_alive"; percent: number }
   | {
       kind: "stat_change";
       target: "self" | "opponent";
@@ -52,26 +51,47 @@ export type MoveEffect =
       stages: number;
       chance: number;
     }
+  | {
+      kind: "flat_stat_bonus";
+      target: "self" | "opponent";
+      stat: StatName;
+      amount: number;
+    }
   | { kind: "recoil"; ratio: number }
   | { kind: "multi_hit"; min: number; max: number }
   | { kind: "body_press" }
   | { kind: "protect" }
   | { kind: "inflict_status"; status: StatusCondition; chance: number }
   | { kind: "flinch"; chance: number }
-  | { kind: "cure_status" }
-  | { kind: "random_extra" };
+  | { kind: "cure_status" };
 
 export interface MoveDefinition {
   id: string;
   name: string;
-  power: number;          // 技の威力 (0 = ダメージなし)
+  power: number;          // 技の威力 (0 = フォーミュラ計算なし。fixedDamage / body_press などが代替)
   category: MoveCategory; // 物理 / 特殊 / 変化
-  accuracy: number;       // 0-100。alwaysHit=true なら無視。
+  accuracy: number;       // 0-100
   pp: number;             // 使用可能回数
-  priority?: number;      // 0 が標準。1 以上で「先制技」
-  alwaysHit?: boolean;    // 「必中」フラグ
+  priority?: number;      // ラウンド内の行動順で素早さより優先される
   effects?: MoveEffect[]; // 追加効果（複数可）
   description: string;
+
+  // === 特殊効果フラグ ===
+  /** 固定ダメージ (defense/attack を見ず、当たれば常にこの値) */
+  fixedDamage?: number;
+  /** 命中すれば即死させる */
+  instantKo?: boolean;
+  /** 時間帯で威力が変わる（move.power は無視される） */
+  timeConditionalPower?: { day: number; night: number };
+  /** 時間帯をセットする変化技 */
+  setTimeOfDay?: TimeOfDay;
+  /**
+   * 物理反射スタンス。使用時に最大 HP の hpCostPercent% を消費し、
+   * このラウンドで相手が物理攻撃を仕掛けてきた場合
+   * - 自分はそのダメージを受けない
+   * - 相手に multiplier 倍のダメージを与える
+   */
+  physicalCounter?: { hpCostPercent: number; multiplier: number };
 }
 
 export interface BaseStats {
@@ -164,9 +184,12 @@ export interface MonsterState {
   currentHp: number;
   ppLeft: Record<string, number>;
   fainted: boolean;
+  /** 倍率制の能力段階（±3） */
   stages: StatStages;
+  /** フラット加算の能力値ボーナス（おぐりの「防御+30」用） */
+  statBonus: StatStages;
   status: StatusCondition | null;
-  /** 状態異常の残りターン (sleep/confusion/drowsy で使用) */
+  /** 状態異常の残りラウンド数 (confusion) */
   statusTurns: number;
 }
 
@@ -189,8 +212,25 @@ export interface BattleSnapshot {
   players: Record<PlayerSlot, PlayerState>;
   log: string[];
   winner: PlayerSlot | null;
-  /** いまどちらの順番か。ターン制バトル用。winner があれば null。 */
-  currentTurnSlot: PlayerSlot | null;
+  /** 現在の時間帯 */
+  timeOfDay: TimeOfDay;
+}
+
+/** 1 アクション分の結果（プレイヤー1人の1行動） */
+export interface ActionResult {
+  actor: PlayerSlot;
+  events: BattleEvent[];
+  /** この行動が終了した時点のスナップショット */
+  snapshotAfter: BattleSnapshot;
+}
+
+/** 1 ラウンド分の結果（両プレイヤーの行動を速度順に解決した結果） */
+export interface RoundResult {
+  /** 速度順に並んだアクション群。早い方が actions[0]。
+   *  途中でひんしが起きた場合、それ以降は実行されないので actions は 1 件のこともある。 */
+  actions: ActionResult[];
+  /** ラウンド全体終了後の最終スナップショット */
+  snapshot: BattleSnapshot;
 }
 
 /** ターン進行の結果として返す差分情報 */
@@ -223,8 +263,5 @@ export function emptyStages(): StatStages {
 }
 
 export const STATUS_LABEL: Record<StatusCondition, string> = {
-  paralysis: "まひ",
   confusion: "こんらん",
-  sleep: "ねむり",
-  drowsy: "うとうと",
 };

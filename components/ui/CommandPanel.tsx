@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import type {
   BattleSnapshot,
   Command,
+  MoveDefinition,
   MoveEffect,
   PlayerSlot,
 } from "@/lib/battle/types";
@@ -15,6 +16,8 @@ interface Props {
   yourSlot: PlayerSlot;
   /** アニメーション中などに UI を無効化する。 */
   disabled?: boolean;
+  /** 相手が技を決めたか。disabled でない時のヒント表示用。 */
+  opponentCommitted?: boolean;
   onSubmit: (cmd: Command) => void;
 }
 
@@ -26,7 +29,7 @@ const CATEGORY_LABEL = {
   status: "変化",
 } as const;
 
-export function CommandPanel({ snapshot, yourSlot, disabled, onSubmit }: Props) {
+export function CommandPanel({ snapshot, yourSlot, disabled, opponentCommitted, onSubmit }: Props) {
   const [tab, setTab] = useState<Tab>("fight");
   const you = snapshot.players[yourSlot];
   const active = you.party[you.activeIndex];
@@ -61,12 +64,17 @@ export function CommandPanel({ snapshot, yourSlot, disabled, onSubmit }: Props) 
                   </div>
                 </div>
                 <div className="text-[10px] text-gray-300">
-                  威 {move.power || "-"} / 命 {move.alwaysHit ? "必中" : move.accuracy} / PP {pp}/{move.pp}
+                  威 {movePowerLabel(move)} / 命 {move.accuracy} / PP {pp}/{move.pp}
                 </div>
-                {move.effects && move.effects.length > 0 && (
+                {(move.effects?.length || hasSpecialFlag(move)) && (
                   <div className="mt-0.5 flex flex-wrap gap-1">
-                    {move.effects.map((e, i) => (
-                      <span key={i} className="text-[10px] text-stadium-accent">
+                    {specialFlagsHint(move).map((s, i) => (
+                      <span key={`sp-${i}`} className="text-[10px] text-rose-300">
+                        {s}
+                      </span>
+                    ))}
+                    {move.effects?.map((e, i) => (
+                      <span key={`ef-${i}`} className="text-[10px] text-stadium-accent">
                         {effectHint(e)}
                       </span>
                     ))}
@@ -108,11 +116,15 @@ export function CommandPanel({ snapshot, yourSlot, disabled, onSubmit }: Props) 
         </div>
       )}
 
-      {disabled && (
+      {disabled ? (
         <div className="mt-2 text-center text-xs text-yellow-300">
-          バトル演出中…
+          相手の入力を待っています…
         </div>
-      )}
+      ) : opponentCommitted ? (
+        <div className="mt-2 text-center text-xs text-stadium-accent">
+          相手は技を決めました。あなたの番です！
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -147,22 +159,61 @@ const STAT_LABEL_SHORT: Record<string, string> = {
 };
 
 const STATUS_LABEL_SHORT: Record<string, string> = {
-  paralysis: "まひ",
   confusion: "こんらん",
-  sleep: "ねむり",
-  drowsy: "うとうと",
 };
+
+function movePowerLabel(move: MoveDefinition): string {
+  if (move.fixedDamage != null) return `${move.fixedDamage}固定`;
+  if (move.instantKo) return "—";
+  if (move.timeConditionalPower) {
+    return `${move.timeConditionalPower.day}/${move.timeConditionalPower.night}`;
+  }
+  if (move.effects?.some((e) => e.kind === "body_press")) return "防御依存";
+  return move.power > 0 ? String(move.power) : "—";
+}
+
+function hasSpecialFlag(move: MoveDefinition): boolean {
+  return !!(
+    move.fixedDamage != null ||
+    move.instantKo ||
+    move.timeConditionalPower ||
+    move.setTimeOfDay ||
+    move.physicalCounter
+  );
+}
+
+function specialFlagsHint(move: MoveDefinition): string[] {
+  const out: string[] = [];
+  if (move.fixedDamage != null) out.push(`固定${move.fixedDamage}`);
+  if (move.instantKo) out.push("命中で即死");
+  if (move.timeConditionalPower) {
+    out.push(`昼${move.timeConditionalPower.day} / 夜${move.timeConditionalPower.night}`);
+  }
+  if (move.setTimeOfDay) {
+    out.push(move.setTimeOfDay === "night" ? "→夜に" : "→昼に");
+  }
+  if (move.physicalCounter) {
+    out.push(`HP-${move.physicalCounter.hpCostPercent}% / 物理反射×${move.physicalCounter.multiplier}`);
+  }
+  return out;
+}
 
 function effectHint(effect: MoveEffect): string {
   switch (effect.kind) {
     case "heal_self":
-      return `自HP +${effect.percent}%`;
-    case "heal_both":
-      return `双方 HP +${effect.percent}%`;
+      if (effect.flat != null) return `自HP +${effect.flat}`;
+      return `自HP +${effect.percent ?? 0}%`;
+    case "heal_all_alive":
+      return `全員 HP +${effect.percent}%`;
     case "stat_change": {
       const who = effect.target === "self" ? "自" : "相";
       const sign = effect.stages > 0 ? "↑" : "↓";
       return `${who}${STAT_LABEL_SHORT[effect.stat]}${sign}${Math.abs(effect.stages)}`;
+    }
+    case "flat_stat_bonus": {
+      const who = effect.target === "self" ? "自" : "相";
+      const sign = effect.amount >= 0 ? "+" : "";
+      return `${who}${STAT_LABEL_SHORT[effect.stat]}${sign}${effect.amount}`;
     }
     case "recoil":
       return `反動${Math.round(effect.ratio * 100)}%`;
@@ -178,7 +229,5 @@ function effectHint(effect: MoveEffect): string {
       return `ひるみ${effect.chance}%`;
     case "cure_status":
       return "状態回復";
-    case "random_extra":
-      return "ランダム効果";
   }
 }

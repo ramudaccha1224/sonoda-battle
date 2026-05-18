@@ -52,7 +52,7 @@ export const MONSTERS: Record<MonsterId, MonsterDefinition> = {
     },
     role: "物理アタッカー",
     tagline: "攻撃力が高く、一撃が重い。物理技を叩きつけて押し切る前衛タイプ。",
-    stats: { hp: 90, attack: 120, defense: 70, spAttack: 50, spDefense: 70, speed: 70 },
+    stats: { hp: 100, attack: 120, defense: 60, spAttack: 50, spDefense: 70, speed: 70 },
     moveIds: ["gabugabu_kamitsuki", "hikkaki_ranbu", "fumifumi_press", "honki_nekokick"],
     birthday: "11月22日",
     favoriteFood: "パンの耳",
@@ -165,6 +165,7 @@ export function createMonsterState(id: MonsterId): MonsterState {
     ppLeft,
     fainted: false,
     stages: emptyStages(),
+    statBonus: emptyStages(),
     status: null,
     statusTurns: 0,
   };

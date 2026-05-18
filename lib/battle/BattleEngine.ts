@@ -1,6 +1,7 @@
 import {
   emptyStages,
   STATUS_LABEL,
+  type ActionResult,
   type BattleEvent,
   type BattleSnapshot,
   type Command,
@@ -9,9 +10,10 @@ import {
   type MoveEffect,
   type PlayerSlot,
   type PlayerState,
+  type RoundResult,
   type StatName,
   type StatusCondition,
-  type TurnResult,
+  type TimeOfDay,
 } from "./types";
 import { Monster } from "../monsters/Monster";
 import { createMonsterState } from "../monsters/definitions";
@@ -35,19 +37,19 @@ export interface NewBattleInput {
 }
 
 /**
- * 純粋なバトルエンジン（ターン制）。
+ * 純粋なバトルエンジン（ラウンド制）。
  *
- * - 同時入力ではなく、片方ずつの完全交代制。
- * - 初回ターンは active モンスターの素早さで決まる（同値なら乱数）。
- * - executeAction 終了後、勝敗が決していなければ自動的にターンが相手に移る。
+ * 1 ラウンドの流れ:
+ *   1. 両プレイヤーから 1 つずつコマンドを受け取る
+ *   2. 行動順を決定（switch → 技 priority → 素早さ → 乱数）
+ *   3. 速い方を先に実行、その結果をスナップショットに記録
+ *   4. もしどちらかのモンスターがひんしになっていたら、そのラウンドは終了
+ *      （遅い方の行動はキャンセル）。自動交代して次のラウンドへ
+ *   5. 両方とも生存していたら遅い方も実行
+ *   6. 最後にラウンド終了処理（drowsy→sleep 等）
  *
- * 1 アクションの流れ:
- *   1. アクター（active モンスター）のターン開始時フラグをリセット
- *   2. 状態異常 / ひるみチェック → 行動可なら command を実行
- *   3. 追加効果適用
- *   4. ターン終了処理（drowsy → sleep 昇格 等）
- *   5. 瀕死チェック → 自動交代 → 勝敗判定
- *   6. ターンを相手に渡す
+ * 結果は ActionResult の配列を持つ RoundResult として返す。
+ * クライアントはこれをアニメ用にひとつずつ順番に再生する。
  */
 export class BattleEngine {
   private players: Record<PlayerSlot, { state: PlayerState; mons: Monster[] }>;
@@ -55,7 +57,8 @@ export class BattleEngine {
   private log: string[] = [];
   private winner: PlayerSlot | null = null;
   private rng: () => number;
-  private currentTurnSlot: PlayerSlot;
+  /** バトル開始時は昼。よるのしじまで「夜」になり、戻る手段はない。 */
+  private timeOfDay: TimeOfDay = "day";
 
   constructor(input: NewBattleInput) {
     this.rng = makeRng(input.seed ?? Date.now());
@@ -63,20 +66,7 @@ export class BattleEngine {
       p1: this.makePlayer("p1", input.p1.name, input.p1.partyIds),
       p2: this.makePlayer("p2", input.p2.name, input.p2.partyIds),
     };
-    // 初回ターン: 素早さの速い方
-    const p1Speed = this.activeOf("p1").effective("speed");
-    const p2Speed = this.activeOf("p2").effective("speed");
-    if (p1Speed > p2Speed) this.currentTurnSlot = "p1";
-    else if (p2Speed > p1Speed) this.currentTurnSlot = "p2";
-    else this.currentTurnSlot = this.rng() < 0.5 ? "p1" : "p2";
-
     this.pushLog(`バトル開始！ ${input.p1.name} vs ${input.p2.name}`);
-    this.pushLog(`${this.players[this.currentTurnSlot].state.name} のターン！`);
-  }
-
-  /** 現在のターン担当者 */
-  get turnOf(): PlayerSlot {
-    return this.currentTurnSlot;
   }
 
   private makePlayer(slot: PlayerSlot, name: string, ids: [MonsterId, MonsterId]) {
@@ -95,48 +85,128 @@ export class BattleEngine {
       },
       log: [...this.log],
       winner: this.winner,
-      currentTurnSlot: this.winner ? null : this.currentTurnSlot,
+      timeOfDay: this.timeOfDay,
     };
   }
 
   /**
-   * 1 名のアクターのアクションを 1 件実行してターンを進める。
+   * 1 ラウンド分の処理。両プレイヤーのコマンドを 1 件ずつ受け取り、
+   * 速度順に解決して RoundResult を返す。
    *
-   * 呼び出し側（Socket サーバー）は事前に slot === turnOf を検証すること。
-   * バックエンドでも一応 slot 違いは弾く（不正コマンドの保険）。
+   * ひんしが起きた時点でラウンドは打ち切り（残った行動はキャンセル）、
+   * 自動交代だけ行う。次ラウンドは UI 側で改めてコマンド入力させる。
    */
-  executeAction(slot: PlayerSlot, cmd: Command): TurnResult {
-    if (this.winner) return { snapshot: this.snapshot(), events: [] };
-    if (slot !== this.currentTurnSlot) {
-      // ターン違いのコマンドは無視。スナップショットだけ返す。
-      return { snapshot: this.snapshot(), events: [] };
+  resolveRound(cmdP1: Command, cmdP2: Command): RoundResult {
+    if (this.winner) {
+      return { actions: [], snapshot: this.snapshot() };
     }
 
     this.turn += 1;
-    const events: BattleEvent[] = [];
 
-    // ターン開始時のフラグをリセット
-    this.activeOf(slot).resetTurnFlags();
-    // 相手のフラグもリセット（ひるみは「次の相手の行動で消費」される設計）
-    this.activeOf(OTHER[slot]).resetTurnFlags();
+    // ターン開始時フラグのリセット
+    this.activeOf("p1").resetTurnFlags();
+    this.activeOf("p2").resetTurnFlags();
 
-    if (!this.activeOf(slot).isFainted) {
-      this.execute(slot, cmd, events);
+    // 行動順を決定: switch > priority > 素早さ > 乱数
+    const order = this.orderActions(cmdP1, cmdP2);
+
+    const actions: ActionResult[] = [];
+
+    for (const { slot, cmd } of order) {
+      if (this.winner) break;
+      // すでにこのラウンドでひんしになっている可能性
+      if (this.activeOf(slot).isFainted) break;
+
+      const actionEvents: BattleEvent[] = [];
+      this.execute(slot, cmd, actionEvents);
+
+      // この行動でひんしが発生したか
+      const anyFainted = this.resolveFaintsAfterAction(actionEvents);
+
+      actions.push({
+        actor: slot,
+        events: actionEvents,
+        snapshotAfter: this.snapshot(),
+      });
+
+      if (anyFainted) {
+        // ラウンド終了 (遅い方の行動はキャンセル)
+        break;
+      }
     }
 
-    // ターン終了時処理
-    this.endOfTurn(events);
-
-    // 瀕死チェック & 自動交代
-    this.handleFaints(events);
-
-    // ターン交代（勝者がいなければ）
-    if (!this.winner) {
-      this.currentTurnSlot = OTHER[this.currentTurnSlot];
-      this.pushLog(`${this.players[this.currentTurnSlot].state.name} のターン！`);
+    // ラウンド終了処理 (drowsy → sleep など) — 誰もひんしになっていない場合のみ
+    if (!this.winner && actions.length === order.length) {
+      const endEvents: BattleEvent[] = [];
+      this.endOfTurn(endEvents);
+      if (endEvents.length > 0 && actions.length > 0) {
+        actions[actions.length - 1].events.push(...endEvents);
+        actions[actions.length - 1].snapshotAfter = this.snapshot();
+      }
     }
 
-    return { snapshot: this.snapshot(), events };
+    return { actions, snapshot: this.snapshot() };
+  }
+
+  /**
+   * 行動の実行順を返す。
+   * - switch コマンドは無条件で先（双方 switch なら速い方が先）
+   * - 移動と move の混在: switch が先
+   * - move 同士は priority (高いほど先) → 素早さ (高いほど先) → 乱数
+   */
+  private orderActions(cmdP1: Command, cmdP2: Command): { slot: PlayerSlot; cmd: Command }[] {
+    const entries: { slot: PlayerSlot; cmd: Command }[] = [
+      { slot: "p1", cmd: cmdP1 },
+      { slot: "p2", cmd: cmdP2 },
+    ];
+
+    entries.sort((a, b) => {
+      const aSwitch = a.cmd.type === "switch";
+      const bSwitch = b.cmd.type === "switch";
+      if (aSwitch !== bSwitch) return aSwitch ? -1 : 1;
+
+      // 両方 move
+      let aPrio = 0, bPrio = 0;
+      if (a.cmd.type === "move") aPrio = getMove(a.cmd.moveId).priority ?? 0;
+      if (b.cmd.type === "move") bPrio = getMove(b.cmd.moveId).priority ?? 0;
+      if (aPrio !== bPrio) return bPrio - aPrio;
+
+      const aSpd = this.activeOf(a.slot).effective("speed");
+      const bSpd = this.activeOf(b.slot).effective("speed");
+      if (aSpd !== bSpd) return bSpd - aSpd;
+
+      return this.rng() < 0.5 ? -1 : 1;
+    });
+
+    return entries;
+  }
+
+  /**
+   * 1 行動分の事後処理: ひんしを検出してログ・イベントを発行、自動交代する。
+   * いずれかが倒れていれば true を返す（ラウンド打ち切りのシグナル）。
+   */
+  private resolveFaintsAfterAction(events: BattleEvent[]): boolean {
+    let anyFainted = false;
+    for (const slot of ["p1", "p2"] as PlayerSlot[]) {
+      const m = this.activeOf(slot);
+      if (m.isFainted) {
+        events.push({ kind: "faint", actor: slot });
+        this.pushLog(`${this.players[slot].state.name} の ${m.name} は倒れた！`);
+        const next = this.players[slot].mons.findIndex((mm) => !mm.isFainted);
+        if (next === -1) {
+          this.winner = OTHER[slot];
+          events.push({ kind: "win", winner: this.winner });
+          this.pushLog(`${this.players[this.winner].state.name} の勝利！`);
+        } else {
+          this.players[slot].state.activeIndex = next;
+          this.pushLog(
+            `${this.players[slot].state.name} は ${this.activeOf(slot).name} を繰り出した！`,
+          );
+        }
+        anyFainted = true;
+      }
+    }
+    return anyFainted;
   }
 
   // ============================================================
@@ -149,9 +219,10 @@ export class BattleEngine {
         this.pushLog(`${this.players[slot].state.name} の交代は失敗した！`);
         return;
       }
-      // 場を離れるモンスターの能力段階・状態異常をリセット
+      // 場を離れるモンスターの能力段階・フラットボーナス・状態異常をリセット
       const leaving = this.activeOf(slot);
       leaving.state.stages = emptyStages();
+      leaving.state.statBonus = emptyStages();
       leaving.state.status = null;
       leaving.state.statusTurns = 0;
       this.players[slot].state.activeIndex = cmd.toIndex;
@@ -181,38 +252,143 @@ export class BattleEngine {
 
     attacker.consumePp(move.id);
 
+    // ===== 特殊技: 時間帯セット =====
+    if (move.setTimeOfDay) {
+      this.timeOfDay = move.setTimeOfDay;
+      this.pushLog(
+        `${attacker.name} の ${move.name}！ あたりは${move.setTimeOfDay === "night" ? "夜" : "昼"}になった！`,
+      );
+      events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: false, critical: false });
+      // 追加効果も一応動かす
+      this.applyExtraEffects(slot, attacker, defender, move, 0, true, events);
+      return;
+    }
+
+    // ===== 特殊技: 物理反射スタンス (くろねこのまじない) =====
+    if (move.physicalCounter) {
+      const cost = Math.max(1, Math.floor((attacker.maxHp * move.physicalCounter.hpCostPercent) / 100));
+      attacker.takeDamage(cost);
+      attacker.pendingPhysicalCounter = { multiplier: move.physicalCounter.multiplier };
+      this.pushLog(`${attacker.name} の ${move.name}！ HP を ${cost} 消費して物理攻撃を待ち構えた！`);
+      events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: false, critical: false });
+      this.applyExtraEffects(slot, attacker, defender, move, 0, true, events);
+      return;
+    }
+
     // protect のチェック: 攻撃技を相手が守っているなら無効化
-    const isOffensive = move.power > 0;
+    const isOffensive =
+      move.power > 0 || !!move.fixedDamage || !!move.instantKo || !!move.timeConditionalPower;
     if (isOffensive && defender.protectedThisTurn) {
       this.pushLog(`${attacker.name} の ${move.name}！ しかし ${defender.name} は守りを固めていた！`);
       events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: true, critical: false });
       return;
     }
 
-    // ===== 攻撃技 =====
+    // ===== 即死技 =====
+    if (move.instantKo) {
+      const result = calcDamage(attacker, defender, move, this.rng, { timeOfDay: this.timeOfDay });
+      if (result.missed) {
+        this.pushLog(`${attacker.name} の ${move.name}！ しかし外れた…`);
+        events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: true, critical: false });
+        return;
+      }
+      const before = defender.state.currentHp;
+      defender.takeDamage(before);
+      this.pushLog(`${attacker.name} の ${move.name}！ ${defender.name} は一撃で倒れた！`);
+      events.push({
+        kind: "move",
+        actor: slot,
+        moveId: move.id,
+        damage: before,
+        missed: false,
+        critical: false,
+      });
+      return;
+    }
+
+    // ===== 固定ダメージ技 =====
+    if (move.fixedDamage != null) {
+      const result = calcDamage(attacker, defender, move, this.rng, { timeOfDay: this.timeOfDay });
+      if (result.missed) {
+        this.pushLog(`${attacker.name} の ${move.name}！ しかし外れた…`);
+        events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: true, critical: false });
+        return;
+      }
+      // 物理反射スタンス対応
+      if (defender.pendingPhysicalCounter && move.category === "physical") {
+        const mult = defender.pendingPhysicalCounter.multiplier;
+        defender.pendingPhysicalCounter = null;
+        const reflectedDamage = Math.floor(result.damage * mult);
+        attacker.takeDamage(reflectedDamage);
+        this.pushLog(
+          `${defender.name} のまじないが発動！ ${attacker.name} に ${reflectedDamage} のダメージを跳ね返した！`,
+        );
+        events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: true, critical: false });
+        return;
+      }
+      defender.takeDamage(result.damage);
+      this.pushLog(`${attacker.name} の ${move.name}！ ${defender.name} に ${result.damage} のダメージ`);
+      events.push({
+        kind: "move",
+        actor: slot,
+        moveId: move.id,
+        damage: result.damage,
+        missed: false,
+        critical: false,
+      });
+      this.applyExtraEffects(slot, attacker, defender, move, result.damage, true, events);
+      return;
+    }
+
+    // ===== 通常攻撃 / 変化技 =====
     let totalDamageDealt = 0;
     let anyHit = false;
 
-    if (move.power > 0) {
+    if (
+      move.power > 0 ||
+      move.timeConditionalPower != null ||
+      move.effects?.some((e) => e.kind === "body_press")
+    ) {
+      // 攻撃技
       const multiHit = move.effects?.find((e) => e.kind === "multi_hit") as
         | Extract<MoveEffect, { kind: "multi_hit" }>
         | undefined;
-      const useDefenseAsAttack = !!move.effects?.find((e) => e.kind === "body_press");
+      const isBodyPress = !!move.effects?.find((e) => e.kind === "body_press");
 
-      const hitCount = multiHit
-        ? randInt(this.rng, multiHit.min, multiHit.max)
-        : 1;
+      // 時間帯条件の威力
+      const powerOverride =
+        move.timeConditionalPower != null
+          ? move.timeConditionalPower[this.timeOfDay === "night" ? "night" : "day"]
+          : undefined;
+
+      const hitCount = multiHit ? randInt(this.rng, multiHit.min, multiHit.max) : 1;
 
       for (let i = 0; i < hitCount; i++) {
         if (defender.isFainted) break;
-        const result = calcDamage(attacker, defender, move, this.rng, { useDefenseAsAttack });
+        const result = calcDamage(attacker, defender, move, this.rng, {
+          bodyPress: isBodyPress,
+          timeOfDay: this.timeOfDay,
+          powerOverride,
+        });
         if (result.missed) {
           if (i === 0) {
             this.pushLog(`${attacker.name} の ${move.name}！ しかし外れた…`);
             events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: true, critical: false });
             return;
           }
-          break; // 連続技の途中で外れたら終了
+          break;
+        }
+        // 物理反射スタンス対応
+        if (defender.pendingPhysicalCounter && move.category === "physical") {
+          const mult = defender.pendingPhysicalCounter.multiplier;
+          defender.pendingPhysicalCounter = null;
+          const reflectedDamage = Math.floor(result.damage * mult);
+          attacker.takeDamage(reflectedDamage);
+          this.pushLog(
+            `${defender.name} のまじないが発動！ ${attacker.name} に ${reflectedDamage} のダメージを跳ね返した！`,
+          );
+          events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: true, critical: false });
+          return;
         }
         defender.takeDamage(result.damage);
         totalDamageDealt += result.damage;
@@ -237,21 +413,39 @@ export class BattleEngine {
         this.pushLog(`${attacker.name} の ${move.name}！ ${hits} 回ヒット、合計 ${totalDamageDealt} ダメージ！`);
       }
     } else {
-      // 変化技は宣言ログだけ
-      this.pushLog(`${attacker.name} の ${move.name}！`);
-      events.push({ kind: "move", actor: slot, moveId: move.id, damage: 0, missed: false, critical: false });
+      // 変化技: 命中判定だけ通す
+      const ok =
+        this.rng() * 100 <= Math.max(0, move.accuracy - (this.timeOfDay === "night" ? 10 : 0));
+      this.pushLog(`${attacker.name} の ${move.name}！${ok ? "" : " しかし外れた…"}`);
+      events.push({
+        kind: "move",
+        actor: slot,
+        moveId: move.id,
+        damage: 0,
+        missed: !ok,
+        critical: false,
+      });
+      if (!ok) return;
       anyHit = true;
     }
 
-    // ===== 追加効果 =====
+    this.applyExtraEffects(slot, attacker, defender, move, totalDamageDealt, anyHit, events);
+  }
+
+  /** move.effects を一括適用するヘルパ */
+  private applyExtraEffects(
+    slot: PlayerSlot,
+    attacker: Monster,
+    defender: Monster,
+    move: MoveDefinition,
+    totalDamageDealt: number,
+    anyHit: boolean,
+    events: BattleEvent[],
+  ) {
     if (!move.effects) return;
     for (const eff of move.effects) {
-      // multi_hit / body_press はダメージ計算側で消費済みなのでここではスキップ
       if (eff.kind === "multi_hit" || eff.kind === "body_press") continue;
-
-      // 攻撃技で 1 回も当たらなかったら追加効果はスキップ
-      if (move.power > 0 && !anyHit) continue;
-
+      if (!anyHit) continue;
       this.applyEffect(slot, attacker, defender, move, eff, totalDamageDealt, events);
       if (this.winner) return;
     }
@@ -271,7 +465,10 @@ export class BattleEngine {
   ) {
     switch (effect.kind) {
       case "heal_self": {
-        const amount = Math.floor((attacker.maxHp * effect.percent) / 100);
+        const amount =
+          effect.flat != null
+            ? effect.flat
+            : Math.floor((attacker.maxHp * (effect.percent ?? 0)) / 100);
         const healed = attacker.heal(amount);
         if (healed > 0) {
           this.pushLog(`${attacker.name} は HP を ${healed} 回復した！`);
@@ -282,14 +479,40 @@ export class BattleEngine {
         return;
       }
 
-      case "heal_both": {
-        const aAmt = Math.floor((attacker.maxHp * effect.percent) / 100);
-        const dAmt = Math.floor((defender.maxHp * effect.percent) / 100);
-        const a = attacker.heal(aAmt);
-        const d = defender.heal(dAmt);
-        if (a > 0) events.push({ kind: "heal", actor: slot, amount: a });
-        if (d > 0) events.push({ kind: "heal", actor: OTHER[slot], amount: d });
-        this.pushLog(`おだやかな空気が流れる。${attacker.name} は ${a}、${defender.name} は ${d} 回復した！`);
+      case "heal_all_alive": {
+        // 両チームのすべての生存モンスターを percent% 回復
+        let totalHealed = 0;
+        for (const s of ["p1", "p2"] as PlayerSlot[]) {
+          for (const m of this.players[s].mons) {
+            if (m.isFainted) continue;
+            const amt = Math.floor((m.maxHp * effect.percent) / 100);
+            const h = m.heal(amt);
+            if (h > 0) {
+              totalHealed += h;
+              events.push({ kind: "heal", actor: s, amount: h });
+            }
+          }
+        }
+        this.pushLog(`おだやかな空気が流れる。全員のHPが合計 ${totalHealed} 回復した！`);
+        return;
+      }
+
+      case "flat_stat_bonus": {
+        const targetSlot = effect.target === "self" ? slot : OTHER[slot];
+        const targetMon = this.activeOf(targetSlot);
+        if (targetMon.isFainted) return;
+        targetMon.changeFlatStat(effect.stat, effect.amount);
+        const sign = effect.amount >= 0 ? "+" : "";
+        this.pushLog(
+          `${targetMon.name} の ${STAT_LABEL[effect.stat]} が ${sign}${effect.amount} された！`,
+        );
+        events.push({
+          kind: "stat_change",
+          actor: slot,
+          target: targetSlot,
+          stat: effect.stat,
+          stages: 0,
+        });
         return;
       }
 
@@ -352,37 +575,6 @@ export class BattleEngine {
         return;
       }
 
-      case "random_extra": {
-        // 50% で何かが起きる
-        if (this.rng() < 0.5) return;
-        const r = this.rng();
-        if (r < 0.25) {
-          // 自分のこうげき +1
-          const d = attacker.changeStage("attack", 1);
-          if (d !== 0) {
-            this.pushLog(`不思議な力！ ${attacker.name} のこうげきが上がった！`);
-            events.push({ kind: "stat_change", actor: slot, target: slot, stat: "attack", stages: d });
-          }
-        } else if (r < 0.5) {
-          // 自分のすばやさ +1
-          const d = attacker.changeStage("speed", 1);
-          if (d !== 0) {
-            this.pushLog(`不思議な力！ ${attacker.name} のすばやさが上がった！`);
-            events.push({ kind: "stat_change", actor: slot, target: slot, stat: "speed", stages: d });
-          }
-        } else if (r < 0.75) {
-          // 相手のぼうぎょ -1
-          const d = defender.changeStage("defense", -1);
-          if (d !== 0) {
-            this.pushLog(`不思議な力！ ${defender.name} のぼうぎょが下がった！`);
-            events.push({ kind: "stat_change", actor: slot, target: OTHER[slot], stat: "defense", stages: d });
-          }
-        } else {
-          // 相手をこんらん
-          this.applyStatusTo(slot, defender, "confusion", events);
-        }
-        return;
-      }
     }
   }
 
@@ -390,49 +582,35 @@ export class BattleEngine {
   // 状態異常まわり
   // ============================================================
 
-  /** 行動前の状態異常チェック。行動可能なら true、不可なら false。 */
+  /**
+   * 行動前の状態異常チェック。
+   * 現状サポートする状態異常は confusion のみ:
+   *   - 50% の確率で自分を攻撃して行動不能
+   *   - 残りラウンド数 2〜3
+   */
   private canActWithStatus(mon: Monster): boolean {
-    const slot = this.slotOf(mon)!;
-    switch (mon.state.status) {
-      case "sleep": {
-        if (mon.state.statusTurns > 0) {
-          mon.state.statusTurns -= 1;
-          this.pushLog(`${mon.name} はぐっすり眠っている…`);
-          return false;
-        }
-        // 起きる
+    if (mon.state.status === "confusion") {
+      // ラウンドカウンタ消化
+      if (mon.state.statusTurns <= 0) {
         mon.state.status = null;
-        this.pushLog(`${mon.name} は目を覚ました！`);
+        this.pushLog(`${mon.name} の こんらん がとけた！`);
         return true;
       }
-      case "paralysis": {
-        if (this.rng() < 0.25) {
-          this.pushLog(`${mon.name} はからだがしびれて動けない！`);
-          return false;
-        }
-        return true;
+      this.pushLog(`${mon.name} は混乱している。`);
+      mon.state.statusTurns -= 1;
+      if (this.rng() < 0.5) {
+        // 自分に体当たり (簡易: 固定値 8 + ATK 比例)
+        const selfHit = Math.max(
+          1,
+          Math.floor((mon.effective("attack") / Math.max(1, mon.effective("defense"))) * 8 + 2),
+        );
+        mon.takeDamage(selfHit);
+        this.pushLog(`${mon.name} はわけがわからず自分を攻撃した！ ${selfHit} のダメージ！`);
+        return false;
       }
-      case "confusion": {
-        // 終了判定
-        if (mon.state.statusTurns <= 0) {
-          mon.state.status = null;
-          this.pushLog(`${mon.name} の こんらん がとけた！`);
-          return true;
-        }
-        mon.state.statusTurns -= 1;
-        if (this.rng() < 1 / 3) {
-          // 自分に体当たり（固定 40 物理）
-          const selfHit = Math.max(1, Math.floor((mon.effective("attack") / mon.effective("defense")) * 8 + 2));
-          mon.takeDamage(selfHit);
-          this.pushLog(`${mon.name} はこんらんしている！ 自分に ${selfHit} のダメージ！`);
-          // event は move 扱いで投げる（victim 用フラッシュには使わない）
-          return false;
-        }
-        return true;
-      }
-      default:
-        return true;
+      return true;
     }
+    return true;
   }
 
   private applyStatusTo(
@@ -441,59 +619,25 @@ export class BattleEngine {
     status: StatusCondition,
     events: BattleEvent[],
   ) {
-    // 既に同じ状態異常 or 上位の異常 (sleep) があるなら入らない
-    if (target.state.status && target.state.status !== "drowsy") {
+    if (target.state.status) {
       this.pushLog(`${target.name} には既に状態異常がある…`);
       return;
     }
-    const turns =
-      status === "sleep" ? randInt(this.rng, 2, 4) :
-      status === "confusion" ? randInt(this.rng, 1, 4) :
-      status === "drowsy" ? 1 :
-      0; // paralysis は無期限
+    // confusion: 2〜3 ラウンド
+    const turns = status === "confusion" ? randInt(this.rng, 2, 3) : 0;
     target.applyStatus(status, turns);
     this.pushLog(`${target.name} は ${STATUS_LABEL[status]} 状態になった！`);
     events.push({ kind: "status_applied", actor: actorSlot, target: this.slotOf(target)!, status });
   }
 
   // ============================================================
-  // ターン終了処理
+  // ラウンド終了処理 (現状は何もしない。将来のフィールド効果や毒等のため残しておく)
   // ============================================================
-  private endOfTurn(events: BattleEvent[]) {
-    for (const slot of ["p1", "p2"] as PlayerSlot[]) {
-      const mon = this.activeOf(slot);
-      if (mon.isFainted) continue;
-      // drowsy → sleep への昇格
-      if (mon.state.status === "drowsy") {
-        mon.state.status = "sleep";
-        mon.state.statusTurns = randInt(this.rng, 2, 3);
-        this.pushLog(`${mon.name} は眠ってしまった！`);
-        events.push({ kind: "status_applied", actor: slot, target: slot, status: "sleep" });
-      }
-    }
+  private endOfTurn(_events: BattleEvent[]) {
+    // no-op
   }
 
-  // ============================================================
-  // 瀕死処理
-  // ============================================================
-  private handleFaints(events: BattleEvent[]) {
-    for (const slot of ["p1", "p2"] as PlayerSlot[]) {
-      const active = this.activeOf(slot);
-      if (active.isFainted) {
-        events.push({ kind: "faint", actor: slot });
-        this.pushLog(`${this.players[slot].state.name} の ${active.name} は倒れた！`);
-        const next = this.players[slot].mons.findIndex((m) => !m.isFainted);
-        if (next === -1) {
-          this.winner = OTHER[slot];
-          events.push({ kind: "win", winner: this.winner });
-          this.pushLog(`${this.players[this.winner].state.name} の勝利！`);
-        } else {
-          this.players[slot].state.activeIndex = next;
-          this.pushLog(`${this.players[slot].state.name} は ${this.activeOf(slot).name} を繰り出した！`);
-        }
-      }
-    }
-  }
+  // 旧 handleFaints は resolveFaintsAfterAction に統合済み
 
   // ============================================================
   private activeOf(slot: PlayerSlot): Monster {
@@ -522,6 +666,7 @@ function cloneState(p: PlayerState): PlayerState {
       ppLeft: { ...m.ppLeft },
       fainted: m.fainted,
       stages: { ...m.stages },
+      statBonus: { ...m.statBonus },
       status: m.status,
       statusTurns: m.statusTurns,
     })),

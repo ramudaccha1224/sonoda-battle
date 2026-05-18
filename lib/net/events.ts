@@ -4,7 +4,13 @@
  * 名前と payload は揃えること。
  */
 
-import type { BattleEvent, BattleSnapshot, Command, MonsterId, PlayerSlot } from "../battle/types";
+import type {
+  BattleSnapshot,
+  Command,
+  MonsterId,
+  PlayerSlot,
+  RoundResult,
+} from "../battle/types";
 
 export interface JoinRoomPayload {
   roomId: string;
@@ -27,10 +33,8 @@ export interface SubmitCommandPayload {
   command: Command;
 }
 
-export interface TurnResolvedPayload {
-  snapshot: BattleSnapshot;
-  events: BattleEvent[];
-}
+/** ラウンド解決時のペイロード。両プレイヤーの行動を速度順に並べた actions を含む。 */
+export type RoundResolvedPayload = RoundResult;
 
 export interface RoomStatePayload {
   phase: "lobby" | "party-select" | "battle" | "ended";
@@ -55,7 +59,7 @@ export interface ServerToClientEvents {
   "room:joined": (p: RoomJoinedPayload) => void;
   "room:state": (p: RoomStatePayload) => void;
   "battle:start": (p: { snapshot: BattleSnapshot }) => void;
-  "battle:turn_resolved": (p: TurnResolvedPayload) => void;
+  "battle:round_resolved": (p: RoundResolvedPayload) => void;
   /** 相手が先に技を決定した。受信側は「相手が決めた」表示だけ出す。操作はブロックしない。 */
   "battle:opponent_committed": () => void;
   "error:msg": (p: { message: string }) => void;
