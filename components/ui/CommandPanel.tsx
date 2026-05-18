@@ -122,7 +122,7 @@ export function CommandPanel({ snapshot, yourSlot, disabled, opponentCommitted, 
         </div>
       ) : opponentCommitted ? (
         <div className="mt-2 text-center text-xs text-stadium-accent">
-          相手は技を決めました。あなたの番です！
+          相手は技を決めました（あなたの入力を待っています）
         </div>
       ) : null}
     </div>

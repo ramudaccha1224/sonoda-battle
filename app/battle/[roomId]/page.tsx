@@ -67,6 +67,9 @@ export default function BattleRoomPage() {
   const roundFinalSnapshotRef = useRef<ReturnType<typeof useBattleStore.getState>["snapshot"]>(null);
   const playNextActionRef = useRef<(() => void) | null>(null);
 
+  // 直近に自分が送信したコマンド。再接続時の自動再送に使う。
+  const lastSubmittedCommandRef = useRef<Command | null>(null);
+
   // ============================================================
   // playOneAction / playNextAction
   // ============================================================
@@ -199,7 +202,25 @@ export default function BattleRoomPage() {
   useEffect(() => {
     const s = getSocket();
     s.on("connect", () => {
+      console.log("[client] socket connect", s.id);
       s.emit("room:join", { roomId, name });
+      // 接続/再接続直後にもし「送信したつもり」のままなら、自動で再送して
+      // サーバ側の pendingCommand と整合させる。サーバは同じ slot の pending を
+      // 上書きするだけなので二重実行にはならない（冪等）。
+      const st = useBattleStore.getState();
+      if (st.commandSubmitted && lastSubmittedCommandRef.current) {
+        console.log("[client] auto-resend submit_command on (re)connect");
+        s.emit("battle:submit_command", {
+          roomId,
+          command: lastSubmittedCommandRef.current,
+        });
+      }
+    });
+    s.on("disconnect", (reason) => {
+      console.warn("[client] socket disconnect", reason);
+    });
+    s.on("connect_error", (err) => {
+      console.error("[client] socket connect_error", err);
     });
     if (s.connected) s.emit("room:join", { roomId, name });
 
@@ -227,23 +248,41 @@ export default function BattleRoomPage() {
     });
 
     s.on("battle:opponent_committed", () => {
+      console.log("[client] opponent_committed");
       useBattleStore.getState().setOpponentCommitted(true);
     });
 
-    s.on("battle:round_resolved", ({ actions, snapshot: finalSnapshot }) => {
-      // 受信時に直前のスナップショット（このラウンドの前）を控えておく。
-      // 各アクションは prevSnapshot を見て「死にゆくモンスターの index」を計算する。
-      const initialSnapshot = useBattleStore.getState().snapshot;
-      pendingActionsRef.current = [...actions];
-      prevSnapshotForActionRef.current = initialSnapshot ?? finalSnapshot;
-      roundFinalSnapshotRef.current = finalSnapshot;
-      setAnimating(true);
-
-      // 最初のアクションから順番に再生
-      playNextActionRef.current?.();
+    s.on("battle:round_resolved", (payload) => {
+      console.log("[client] round_resolved received", {
+        actionCount: payload?.actions?.length,
+        winner: payload?.snapshot?.winner,
+      });
+      try {
+        const { actions, snapshot: finalSnapshot } = payload;
+        const initialSnapshot = useBattleStore.getState().snapshot;
+        pendingActionsRef.current = [...actions];
+        prevSnapshotForActionRef.current = initialSnapshot ?? finalSnapshot;
+        roundFinalSnapshotRef.current = finalSnapshot;
+        setAnimating(true);
+        // 最初のアクションから順番に再生
+        if (playNextActionRef.current) {
+          playNextActionRef.current();
+        } else {
+          console.error("[client] playNextActionRef not initialized — fallback to direct endRound");
+          useBattleStore.getState().endRound(finalSnapshot, []);
+          setAnimating(false);
+        }
+      } catch (err) {
+        console.error("[client] round_resolved handler threw", err);
+        // 落とすよりは復旧して次の入力を受け付けるほうがマシ
+        const fs = payload?.snapshot;
+        if (fs) useBattleStore.getState().endRound(fs, []);
+        setAnimating(false);
+      }
     });
 
     s.on("error:msg", ({ message }) => {
+      console.error("[client] error:msg from server:", message);
       store.setError(message);
     });
 
@@ -262,7 +301,9 @@ export default function BattleRoomPage() {
   function submitCommand(cmd: Command) {
     if (animating) return;
     if (store.commandSubmitted) return;
+    console.log("[client] emit submit_command", cmd);
     store.setCommandSubmitted(true);
+    lastSubmittedCommandRef.current = cmd;
     getSocket().emit("battle:submit_command", { roomId, command: cmd });
   }
 
@@ -453,10 +494,12 @@ function BattleView({
 
         {storePhase === "battle" && !snapshot.winner && !animating && (
           <div className="absolute left-1/2 top-3 -translate-x-1/2 rounded-full bg-black/60 px-4 py-1 text-xs text-gray-200 shadow-lg">
+            {/* 同時送信のラウンド制。先攻/後攻は両者送信後に速度で決まるので、
+                送信前に「あなたの番」のような turn-base 風表現は出さない。 */}
             {commandSubmitted
-              ? "相手を待っています…"
+              ? "相手の入力を待っています…"
               : opponentCommitted
-                ? "相手は技を決めました。あなたの番です"
+                ? "相手は技を決めました（あなたの入力を待っています）"
                 : "技を選んでください"}
           </div>
         )}
