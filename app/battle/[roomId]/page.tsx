@@ -477,7 +477,11 @@ function BattleView({
 
   return (
     <div className="grid h-full grid-rows-[auto_1fr_auto] gap-2 p-3">
-      <PartyBar player={effectiveSnapshot.players[opponent]} side="right" />
+      {/* 上部: 自分と相手のパーティ情報を左右に並べる（高さ節約） */}
+      <div className="grid grid-cols-2 gap-2">
+        <PartyBar player={effectiveSnapshot.players[yourSlot]} side="left" />
+        <PartyBar player={effectiveSnapshot.players[opponent]} side="right" />
+      </div>
 
       <div className="relative overflow-hidden rounded-lg">
         <BattleScene
@@ -492,18 +496,7 @@ function BattleView({
           faintingInfo={faintingInfo}
         />
 
-        {storePhase === "battle" && !snapshot.winner && !animating && (
-          <div className="absolute left-1/2 top-3 -translate-x-1/2 rounded-full bg-black/60 px-4 py-1 text-xs text-gray-200 shadow-lg">
-            {/* 同時送信のラウンド制。先攻/後攻は両者送信後に速度で決まるので、
-                送信前に「あなたの番」のような turn-base 風表現は出さない。 */}
-            {commandSubmitted
-              ? "相手の入力を待っています…"
-              : opponentCommitted
-                ? "相手は技を決めました（あなたの入力を待っています）"
-                : "技を選んでください"}
-          </div>
-        )}
-
+        {/* 勝敗結果は引き続き 3D 上にオーバーレイ。入力状態のテキストは出さない。 */}
         {snapshot.winner && (
           <div className="absolute inset-0 grid place-items-center bg-black/60 text-3xl font-bold">
             {snapshot.winner === yourSlot ? "あなたの勝ち！" : "あなたの負け…"}
@@ -511,19 +504,15 @@ function BattleView({
         )}
       </div>
 
-      <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_2fr]">
-        <PartyBar player={effectiveSnapshot.players[yourSlot]} side="left" />
-
-        {storePhase === "battle" && (
-          <CommandPanel
-            snapshot={snapshot}
-            yourSlot={yourSlot}
-            disabled={animating || commandSubmitted}
-            opponentCommitted={opponentCommitted && !commandSubmitted}
-            onSubmit={onSubmit}
-          />
-        )}
-      </div>
+      {storePhase === "battle" && (
+        <CommandPanel
+          snapshot={snapshot}
+          yourSlot={yourSlot}
+          disabled={animating || commandSubmitted}
+          opponentCommitted={opponentCommitted && !commandSubmitted}
+          onSubmit={onSubmit}
+        />
+      )}
     </div>
   );
 }

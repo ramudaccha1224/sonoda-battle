@@ -290,7 +290,7 @@ export function BattleScene({
           onLimbRefs={(refs) => {
             yourLimbsRef.current = refs;
           }}
-          label={`${yourActive.currentHp}/${yourDef.stats.hp} ${yourDef.name}`}
+          label={yourDef.name}
         />
       </AnimatedCat>
 
@@ -315,7 +315,7 @@ export function BattleScene({
           onLimbRefs={(refs) => {
             oppLimbsRef.current = refs;
           }}
-          label={`${oppDef.name} ${oppActive.currentHp}/${oppDef.stats.hp}`}
+          label={oppDef.name}
         />
       </AnimatedCat>
 
