@@ -47,7 +47,11 @@ export function CharacterDetailModal({ monsterId, onClose }: Props) {
       onClick={onClose}
     >
       <div
-        className="relative flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-stadium-bg shadow-2xl ring-1 ring-white/10"
+        className="relative flex w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-stadium-bg shadow-2xl ring-1 ring-white/10"
+        // iOS Safari の URL バーに被って下部ボタンが見切れないよう、
+        // svh（small viewport height）/ dvh（dynamic viewport height）でフォールバック付き指定。
+        // svh は URL バー表示中の小さい viewport、対応しない古い環境では vh にフォールバック。
+        style={{ maxHeight: "min(92vh, 88svh)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -100,8 +104,12 @@ export function CharacterDetailModal({ monsterId, onClose }: Props) {
           </div>
         </div>
 
-        {/* 下部の大きな戻るボタン（タップしやすい固定フッター） */}
-        <div className="border-t border-white/10 bg-stadium-bg/95 p-3 backdrop-blur">
+        {/* 下部の大きな戻るボタン（タップしやすい固定フッター）
+            iPhone のホームインジケータ領域に被らないよう safe-area inset を確保 */}
+        <div
+          className="border-t border-white/10 bg-stadium-bg/95 px-3 pt-3 backdrop-blur"
+          style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
+        >
           <button
             onClick={onClose}
             className="w-full rounded-lg bg-stadium-accent px-4 py-3 text-base font-bold text-white transition hover:brightness-110 active:scale-[0.99]"

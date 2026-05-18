@@ -38,14 +38,15 @@ export function PartySelect({ onConfirm, disabled }: Props) {
           パーティを 2 体選んでください（ {picks.length} / 2 ）
         </div>
         <div className="text-[10px] text-gray-500">
-          「わざをみる」でキャラの覚えているわざを確認できます
+          選んだ順に登場します
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         {MONSTER_IDS.map((id) => {
           const def = MONSTERS[id];
-          const selected = picks.includes(id);
+          const pickIndex = picks.indexOf(id);
+          const selected = pickIndex >= 0;
           return (
             <div
               key={id}
@@ -66,7 +67,7 @@ export function PartySelect({ onConfirm, disabled }: Props) {
             >
               {selected && (
                 <span className="absolute right-2 top-2 rounded-full bg-stadium-accent px-2 py-0.5 text-[10px] font-bold text-white">
-                  選択中
+                  {pickIndex === 0 ? "1体目" : "2体目"}
                 </span>
               )}
               <div className="rounded-full bg-black/30 p-2">
