@@ -24,9 +24,9 @@ export const MONSTERS: Record<MonsterId, MonsterDefinition> = {
     stats: { hp: 100, attack: 80, defense: 80, spAttack: 80, spDefense: 80, speed: 80 },
     moveIds: ["zenryoku_nekopunch", "issho_ohirune", "shippo_aisatsu", "okaeri_tackle"],
     birthday: "2月23日",
-    favoriteFood: "パンの耳",
+    favoriteFood: "マーマレードジャム",
     description:
-      "頑張っている人の前にだけ現れる園田駅付近在住の白いネコ。真面目で無口で加えて不思議ちゃん。パン作りが趣味で、パンの耳が好きな模様。",
+      "頑張っている人の前にだけ現れる、園田駅付近在住の白いネコ。昼はお昼寝をして、夜に頑張る人の「頑張らない時間」を作るために「おかえり」を言いにきてくれます。",
   },
   mimura: {
     id: "mimura",
@@ -57,7 +57,7 @@ export const MONSTERS: Record<MonsterId, MonsterDefinition> = {
     birthday: "11月22日",
     favoriteFood: "パンの耳",
     description:
-      "真面目で無口で加えて不思議ちゃん。パン作りが趣味で、パンの耳が好きな模様。",
+      "真面目で無口、加えて少し不思議ちゃん。パン作りが趣味ですが、よくパン耳泥棒をして怒られています。本人は全く更生する気がありません。",
   },
   kurobe: {
     id: "kurobe",
@@ -70,7 +70,7 @@ export const MONSTERS: Record<MonsterId, MonsterDefinition> = {
     birthday: "4月15日",
     favoriteFood: "黒ゴマプリン",
     description:
-      "頭が良くてとにかく優しい博愛者。やさしさにつけ込まれて、よく変な壺とか買わされそうになる。",
+      "頭が良くてとにかく優しい博愛者。お人好しすぎて、よく変な壺などを買わされそうになります。頭の毛（？）が寝癖なのかおしゃれパーマなのかは誰も知りません。",
   },
   abe: {
     id: "abe",
@@ -99,7 +99,7 @@ export const MONSTERS: Record<MonsterId, MonsterDefinition> = {
     birthday: "12月25日",
     favoriteFood: "きつねうどん",
     description:
-      "ぱっきり白黒のハチ割れ？ねこ。おっちょこちょいでタフ、すこし鈍感なのがたまにキズ。",
+      "常識人でしっかり者。マイペースで自由奔放な他のメンバーにツッコミを入れたり、面倒を見たりするお母さんのようなポジションです。",
   },
   oguri: {
     id: "oguri",
@@ -132,7 +132,7 @@ export const MONSTERS: Record<MonsterId, MonsterDefinition> = {
     birthday: "9月29日",
     favoriteFood: "モンブラン",
     description:
-      "寒がりなお風呂大好きボーイ。恥ずかしがり屋で気弱な性格で、言いたいことがある時は口をもにょもにょさせている。おもちほっぺに泣きぼくろがあるのと、背中の黒豆のようなぶち模様が、チャームポイント。",
+      "ブラウンのネコ。恥ずかしがり屋で気弱な性格。最年少で小柄なため、弟のように扱われて世話を焼かれがち。",
   },
   toda: {
     id: "toda",
@@ -144,7 +144,8 @@ export const MONSTERS: Record<MonsterId, MonsterDefinition> = {
     moveIds: ["fushigi_kezukuroi", "matatabi_mist", "akubi_rensa", "bikkuribako_jump"],
     birthday: "8月5日",
     favoriteFood: "クリームソーダ",
-    description: "明るさだけが取り柄のバカ正直者。声が大きくてどんちゃん騒ぎが好き。",
+    description:
+      "明るさだけが取り柄のバカ正直者。声が大きくてどんちゃん騒ぎが大好きです。アクティブな性格で、趣味は登山とロッククライミング。",
   },
 };
 
