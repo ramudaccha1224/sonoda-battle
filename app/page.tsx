@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -71,6 +72,13 @@ export default function HomePage() {
         合言葉は何でも OK（ひらがな・英数・記号など）。<br />
         既に 2 人入室済みの合言葉では入れません。
       </p>
+
+      <Link
+        href="/characters"
+        className="w-full rounded-lg border border-white/20 bg-black/30 px-4 py-3 text-center text-sm font-bold text-white transition hover:bg-white/10"
+      >
+        🐱 キャラクター情報をみる
+      </Link>
     </main>
   );
 }

@@ -47,7 +47,7 @@ export function CharacterDetailModal({ monsterId, onClose }: Props) {
       onClick={onClose}
     >
       <div
-        className="relative max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-xl bg-stadium-bg shadow-2xl ring-1 ring-white/10"
+        className="relative flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-stadium-bg shadow-2xl ring-1 ring-white/10"
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -58,43 +58,56 @@ export function CharacterDetailModal({ monsterId, onClose }: Props) {
           ✕
         </button>
 
-        <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-[260px_1fr]">
-          {/* 左: 3D プレビュー + プロフィール */}
-          <div className="flex flex-col gap-2">
-            <div className="h-64 overflow-hidden rounded-lg bg-black/40">
-              <MonsterPreview defId={monsterId} />
-            </div>
-            <div className="rounded-lg bg-black/40 p-3 text-xs text-gray-200">
-              <ProfileRow label="誕生日" value={def.birthday} />
-              <ProfileRow label="好きな食べ物" value={def.favoriteFood} />
-            </div>
-          </div>
-
-          {/* 右: 名前・説明・技 */}
-          <div className="space-y-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <CatIcon
-                  color={def.displayColor}
-                  size={28}
-                  pattern={def.iconPattern}
-                />
-                <h2 className="text-2xl font-bold leading-none">{def.name}</h2>
+        {/* スクロールするコンテンツ部分 */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-[260px_1fr]">
+            {/* 左: 3D プレビュー + プロフィール */}
+            <div className="flex flex-col gap-2">
+              <div className="h-64 overflow-hidden rounded-lg bg-black/40">
+                <MonsterPreview defId={monsterId} />
               </div>
-              <p className="mt-3 text-sm leading-relaxed text-gray-200">
-                {def.description}
-              </p>
-            </div>
-
-            <div>
-              <div className="mb-1 text-xs text-gray-400">覚えているわざ</div>
-              <div className="space-y-2">
-                {def.moveIds.map((mid) => (
-                  <MoveCard key={mid} move={getMove(mid)} />
-                ))}
+              <div className="rounded-lg bg-black/40 p-3 text-xs text-gray-200">
+                <ProfileRow label="誕生日" value={def.birthday} />
+                <ProfileRow label="好きな食べ物" value={def.favoriteFood} />
               </div>
             </div>
+
+            {/* 右: 名前・説明・技 */}
+            <div className="space-y-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <CatIcon
+                    color={def.displayColor}
+                    size={28}
+                    pattern={def.iconPattern}
+                  />
+                  <h2 className="text-2xl font-bold leading-none">{def.name}</h2>
+                </div>
+                <p className="mt-3 text-sm leading-relaxed text-gray-200">
+                  {def.description}
+                </p>
+              </div>
+
+              <div>
+                <div className="mb-1 text-xs text-gray-400">覚えているわざ</div>
+                <div className="space-y-2">
+                  {def.moveIds.map((mid) => (
+                    <MoveCard key={mid} move={getMove(mid)} />
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
+        </div>
+
+        {/* 下部の大きな戻るボタン（タップしやすい固定フッター） */}
+        <div className="border-t border-white/10 bg-stadium-bg/95 p-3 backdrop-blur">
+          <button
+            onClick={onClose}
+            className="w-full rounded-lg bg-stadium-accent px-4 py-3 text-base font-bold text-white transition hover:brightness-110 active:scale-[0.99]"
+          >
+            戻る
+          </button>
         </div>
       </div>
     </div>
