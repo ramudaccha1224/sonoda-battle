@@ -1,12 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { PartySelect } from "@/components/ui/PartySelect";
+import { CharacterRoster } from "@/components/ui/CharacterRoster";
 
 /**
- * キャラクター情報ページ。TOP からアクセス可能。
- * パーティ選択画面とほぼ同じレイアウトで、決定ボタンを持たない閲覧専用モード。
- * 各キャラの「わざをみる」も利用できる。
+ * 【閲覧専用】キャラクター情報ページ。TOP からアクセス可能。
+ * 対戦用パーティ選択（ルーム内）とは別物。決定ボタンは持たない。
  */
 export default function CharactersPage() {
   return (
@@ -26,7 +25,7 @@ export default function CharactersPage() {
         カードをタップすると詳細とわざがみられます。
       </p>
 
-      <PartySelect viewOnly />
+      <CharacterRoster />
 
       <div className="mt-6">
         <Link
